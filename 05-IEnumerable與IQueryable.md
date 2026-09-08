@@ -1,0 +1,150 @@
+---
+title: 05 IEnumerable 與 IQueryable
+tags: [csharp, linq, ef-core, sql]
+---
+
+# 05 `IEnumerable<T>` vs `IQueryable<T>`
+
+## 學習目標
+
+- 分辨 LINQ to Objects 與 LINQ to Entities。
+- 知道 expression tree、deferred execution、`ToList` / `ToListAsync` 的位置。
+- 避免 EF Core 常見的 N+1、過早 materialization 與 client-side filtering 問題。
+
+## 1. 一句話理解
+
+`IEnumerable<T>` 的 query 由 .NET 在記憶體中執行；`IQueryable<T>` 把 query 表達成 provider 可以解析的 expression tree，EF Core 通常把它翻成 SQL，在 `ToListAsync()` 等 terminal operation 才送到資料庫。
+
+## 2. Java 對照
+
+| C# | Java / SQL 世界的直覺 |
+| --- | --- |
+| `IEnumerable<T>` | Java Stream over in-memory collection；LINQ to Objects |
+| `IQueryable<T>` | 比較像「可由 ORM provider 翻譯的 query specification」，不是 Java Stream 的完全等價物 |
+| `Expression<Func<T,bool>>` | 可被檢查結構的 expression tree；不是單純已編譯 function |
+| EF Core | JPA / Hibernate 類似的 ORM，但 query API、tracking 與 translation 細節不同 |
+| `ToListAsync()` | 執行 query、等待 DB 結果、materialize 成記憶體 list |
+
+## 3. C# 語法
+
+### `IEnumerable<T>`：LINQ to Objects
+
+```csharp
+IEnumerable<User> users = GetUsersFromMemory();
+
+var result = users
+    .Where(x => x.IsActive)
+    .Select(x => x.Name)
+    .ToList(); // predicate / projection 在目前 process 執行
+```
+
+lambda 在這裡通常轉成 `Func<User, bool>` / `Func<User, string>`；`Enumerable.Where` 會逐筆呼叫 delegate。
+
+### `IQueryable<T>`：provider 可解析的 query
+
+```csharp
+IQueryable<User> query = dbContext.Users
+    .Where(x => x.IsActive);
+
+var activeNames = await query
+    .OrderBy(x => x.Name)
+    .Select(x => x.Name)
+    .ToListAsync(cancellationToken);
+```
+
+對 `IQueryable<T>`，lambda 可能被轉成 `Expression<Func<User, bool>>`。EF Core 解析 expression tree，依 provider 把可翻譯部分轉成 SQL。
+
+## 4. 實務範例：EF Core query 的執行邊界
+
+```csharp
+var names = await _context.Users
+    .Where(x => x.IsActive)
+    .Select(x => x.Name)
+    .ToListAsync(cancellationToken);
+```
+
+大致流程：
+
+```text
+DbSet<User>（IQueryable<User>）
+    ↓  Where / Select 組成 expression tree
+    ↓  ToListAsync() 觸發 provider
+EF Core 產生 SQL，例如 SELECT Name FROM Users WHERE IsActive = 1
+    ↓  SQL Server 執行
+    ↓  結果 materialize 成 List<string>
+```
+
+### 什麼時候回到 memory？
+
+```csharp
+var users = await _context.Users
+    .Where(x => x.IsActive)
+    .ToListAsync(cancellationToken); // SQL 已執行，users 是 List<User>
+
+var result = users
+    .Where(x => IsSpecialName(x.Name)) // 這裡是 LINQ to Objects
+    .ToList();
+```
+
+明確呼叫 `AsEnumerable()` 也會把後續 pipeline 切到 `IEnumerable<T>`：
+
+```csharp
+var result = _context.Users
+    .Where(x => x.IsActive) // 嘗試翻 SQL
+    .AsEnumerable()
+    .Where(x => IsSpecialName(x.Name)) // 在 memory 執行
+    .ToList();
+```
+
+使用前要問：你是「不得不使用只能在 C# 執行的邏輯」，還是只是沒查清楚 EF Core 能否翻譯？能在 SQL 做的 filter / projection，通常應留在 `IQueryable` 階段。
+
+### 常見效能問題
+
+```csharp
+// 不好：先把整張 Users table 載入，再在 memory 過濾。
+var all = await _context.Users.ToListAsync(cancellationToken);
+var active = all.Where(x => x.IsActive).ToList();
+
+// 較好：讓 SQL Server 過濾。
+var active = await _context.Users
+    .Where(x => x.IsActive)
+    .ToListAsync(cancellationToken);
+```
+
+```csharp
+// 不好：只要 name，卻先載入完整 entity。
+var names = (await _context.Users.ToListAsync(cancellationToken))
+    .Select(x => x.Name)
+    .ToList();
+
+// 較好：只投影需要的 column。
+var names = await _context.Users
+    .Select(x => x.Name)
+    .ToListAsync(cancellationToken);
+```
+
+其他常見問題：
+
+- 在 loop 裡對每個 parent 另外查 child，產生 N+1 queries。
+- 過早 `ToList()`，讓後續 filter / sort 在 application memory 執行。
+- 在不確定 translation 的地方加入自訂 method，導致 exception 或意外 client evaluation。
+- 沒有 pagination，對大 table 直接 `ToListAsync()`。
+- 把 `IQueryable<T>` 從 repository 洩漏到太多層，讓上層任意組 query，造成 transaction、tracking、效能責任不清楚。
+
+## 5. 常見誤解
+
+- `IQueryable<T>` 不代表「一定是 database」；它只是一個 provider query abstraction。
+- 寫了 `Where` 不代表已查 DB；`ToListAsync`、`FirstAsync`、`AnyAsync` 等才常是 execution boundary。
+- `ToListAsync` 不是在任何 `IEnumerable<T>` 都有；它通常是 EF Core / async LINQ provider 的 extension。
+- `IEnumerable<T>` 並非永遠是快照；可能是 lazy iterator，每次列舉都重新工作。
+- `AsEnumerable()` 不會把資料自動縮小；若放得太早，反而把大量資料拉到 memory。
+
+## 6. 面試怎麼回答
+
+> `IEnumerable<T>` 代表在 application memory 中列舉，LINQ to Objects 會直接執行 delegates。`IQueryable<T>` 讓 provider 取得 expression tree，EF Core 可以把 query 翻成 SQL。兩者通常都是 deferred execution，直到 `ToListAsync`、`FirstAsync` 或 `AnyAsync` 才真正查詢。效能上我會把 filter、projection、pagination 盡量留在 `IQueryable`，避免過早 `ToList`、N+1 和把不必要的欄位載入記憶體。
+
+## 7. 小練習
+
+1. 判斷 `db.Users.Where(...).ToListAsync()` 中哪一行觸發 DB。
+2. 把「先查所有 user 再 filter」改成 SQL-friendly query。
+3. 解釋 `AsEnumerable()` 為什麼是重要的執行位置切換點。
