@@ -13,7 +13,7 @@ tags: [csharp, generics, collections, api-design]
 
 ## 1. 一句話理解
 
-Generic 讓 collection 保持 compile-time type safety；collection interface 則是在 API 邊界上只暴露呼叫者真正需要的能力。
+回傳型別是一份承諾。signature 上寫 `IReadOnlyList<T>` 還是 `List<T>`，決定的是呼叫者能對這份資料做什麼、以及你之後還能不能換掉實作。generic 則讓這份承諾連「裡面裝什麼」都由 compiler 幫你盯。
 
 ## 2. Java 對照
 
@@ -30,6 +30,34 @@ Generic 讓 collection 保持 compile-time type safety；collection interface �
 
 ## 3. C# 語法
 
+先看一個會出事的寫法。
+
+```csharp
+// repository
+public IEnumerable<User> GetActiveUsers()
+    => _context.Users.Where(x => x.IsActive); // 沒有 ToList
+
+// controller
+var users = _repository.GetActiveUsers();
+var total = users.Count();      // 查一次資料庫
+foreach (var user in users) { } // 再查一次
+```
+
+回傳 `IEnumerable<T>` 等於說「我給你一份還沒算的東西，你什麼時候列舉，我什麼時候去拿」。上面這段查了兩次資料庫。更麻煩的是，`DbContext` 如果在 controller 用到它之前就被 dispose，`ObjectDisposedException` 會在列舉的那一刻才炸，而 stack trace 指的是 controller，不是那個忘了寫 `ToList` 的 repository。這種東西要找很久。
+
+先查完再回傳，型別也一起換掉：
+
+```csharp
+public async Task<IReadOnlyList<User>> GetActiveUsersAsync(CancellationToken ct)
+    => await _context.Users
+        .Where(x => x.IsActive)
+        .ToListAsync(ct);
+```
+
+`IReadOnlyList<User>` 在 signature 上講了兩件事：資料已經在手上，還有你別改它。
+
+基本的 collection 長這樣：
+
 ```csharp
 public sealed record User(Guid Id, string Name);
 
@@ -44,23 +72,6 @@ var byId = new Dictionary<Guid, User>
     [users[0].Id] = users[0],
     [users[1].Id] = users[1]
 };
-```
-
-典型 signature：
-
-```csharp
-public interface IUserReader
-{
-    IEnumerable<User> StreamUsers();
-    IReadOnlyCollection<User> GetUsers();
-    IReadOnlyList<User> GetUsersInOrder();
-}
-
-public interface IUserStore
-{
-    ICollection<User> MutableUsers { get; }
-    List<User> GetInternalList(); // 通常不應把實作型別暴露到 public boundary
-}
 ```
 
 ### interface collection vs concrete collection
@@ -82,18 +93,40 @@ public IReadOnlyList<User> GetUsers()
 
 ### 泛型 method
 
+分頁大概是最常自己寫 generic 的地方：
+
 ```csharp
-public static T? FindById<T>(
-    IEnumerable<T> items,
-    Func<T, bool> predicate)
-    => items.FirstOrDefault(predicate);
+public sealed record PagedResult<T>(
+    IReadOnlyList<T> Items,
+    int TotalCount,
+    int Page,
+    int PageSize);
+
+public async Task<PagedResult<User>> GetUsersAsync(
+    int page,
+    int pageSize,
+    CancellationToken ct)
+{
+    var query = _context.Users.Where(x => x.IsActive);
+
+    var total = await query.CountAsync(ct);
+    var items = await query
+        .OrderBy(x => x.CreatedAt)
+        .Skip((page - 1) * pageSize)
+        .Take(pageSize)
+        .ToListAsync(ct);
+
+    return new PagedResult<User>(items, total, page, pageSize);
+}
 ```
 
-`T` 是 type parameter；`Func<T, bool>` 是 delegate，代表一個接收 `T`、回傳 `bool` 的 function。C# 也支援 generic constraints：
+`T` 是 type parameter，`PagedResult<T>` 寫一次，`User`、`Order` 都能用；而且 compiler 會擋掉「把 `PagedResult<User>` 當成 `PagedResult<Order>` 傳」這種事。
+
+constraint 是規定 `T` 至少要長什麼樣。掛上 `where T : Entity`（02 那個有 `Id` 的 abstract class），compiler 才讓你在裡面碰 `x.Id`：
 
 ```csharp
-public static T Create<T>() where T : new()
-    => new T();
+public static T? FindById<T>(IEnumerable<T> items, Guid id) where T : Entity
+    => items.FirstOrDefault(x => x.Id == id);
 ```
 
 ## 4. 實務範例：service boundary 的回傳型別
@@ -101,25 +134,21 @@ public static T Create<T>() where T : new()
 ```csharp
 public interface IUserRepository
 {
-    Task<IReadOnlyList<User>> GetActiveUsersAsync(
-        CancellationToken cancellationToken);
+    Task<IReadOnlyList<User>> GetActiveUsersAsync(CancellationToken cancellationToken);
 }
 
-public sealed class UserRepository : IUserRepository
+public sealed class UserRepository(AppDbContext context) : IUserRepository
 {
     public async Task<IReadOnlyList<User>> GetActiveUsersAsync(
         CancellationToken cancellationToken)
-    {
-        // 實務上可能是 EF Core ToListAsync(cancellationToken)。
-        await Task.Yield();
-        return _users.Where(x => x.IsActive).ToList();
-    }
-
-    private readonly List<User> _users = [];
+        => await context.Users
+            .Where(x => x.IsActive)
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(cancellationToken);
 }
 ```
 
-為什麼不直接回傳 `List<User>`？因為 repository 只需要承諾「這是一組可讀、有順序的結果」，不需要讓 caller 依賴 list-specific API；未來可以改成 array、EF materialized result 或其他實作，而不必改變 contract。
+為什麼不直接回傳 `List<User>`？repository 要承諾的只有「這是一組可讀、有順序的結果」。回傳 `List<User>`，caller 就能對它 `Add`、`Clear`、`Sort`——那份 list 是剛從資料庫撈出來的副本，改了不會進資料庫，但後面的程式很容易以為改到了。另外，哪天你想改成回傳 array 或別的結果型別，contract 也得跟著動。
 
 選擇時可以問三個問題：
 
