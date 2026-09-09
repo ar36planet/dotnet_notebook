@@ -85,7 +85,21 @@ var byDepartment = users.GroupBy(x => x.Department);
 var nameById = users.ToDictionary(x => x.Id, x => x.Name);
 ```
 
-`First` 表示「只要第一個，沒有就是程式錯誤」；`Single` 表示「domain 保證剛好一個」。不要把它們只當成語法替換，method name 也在表達 domain assumption。
+`First` 和 `Single` 的差別不在哪個比較安全，在你對資料的假設。同一個 email 註冊了兩個帳號時：
+
+```csharp
+var accounts = new List<Account>
+{
+    new(1, "ada@example.com"),
+    new(2, "ada@example.com"),
+};
+
+accounts.First(a => a.Email == "ada@example.com");   // Id=1，重複這件事被吃掉
+accounts.Single(a => a.Email == "ada@example.com");  // InvalidOperationException:
+                                                     // Sequence contains more than one matching element
+```
+
+email 唯一是 domain 規則。寫 `Single` 等於把規則放進 code，規則被破壞時會停在這一行；寫 `First` 則是後面每一段都拿到「其中一筆」，而且拿到哪一筆看順序。
 
 ### `SelectMany`
 
@@ -131,12 +145,29 @@ public static IReadOnlyList<UserDto> ToActiveUserDtos(
 
 ### deferred execution vs immediate execution
 
-```csharp
-var query = users.Where(x => x.IsActive); // 尚未列舉，通常尚未跑 predicate
+出貨清單先篩出還沒出貨的訂單，中間又進來一筆新訂單：
 
-users.Add(new User(...));
-var snapshot = query.ToList(); // 到這裡才執行並包含當下資料
+```csharp
+var orders = new List<Order>
+{
+    new(1, "A001", 1200m, Shipped: false),
+    new(2, "A002", 890m, Shipped: true),
+};
+
+int checkCount = 0;
+var pending = orders.Where(o => { checkCount++; return !o.Shipped; });
+// 這行跑完 checkCount 還是 0，predicate 一次都沒跑
+
+orders.Add(new Order(3, "A003", 450m, Shipped: false));
+
+Console.WriteLine(pending.Count()); // 2，A003 也被算進去
+Console.WriteLine(pending.Count()); // 2
+Console.WriteLine(checkCount);      // 6
 ```
+
+`pending` 不是結果，是一份還沒跑的查詢。它在 `Count()` 那一刻才去看 `orders`，看到的是當下的內容，所以後來才加的 A003 也在裡面。
+
+`checkCount` 是 6：三筆訂單、列舉兩次。這裡的 predicate 只是讀一個 bool 所以看不出差別；換成要查資料庫或呼叫 API 的判斷，同一段 code 就是兩倍成本。要固定結果、也只算一次，就 `ToList()`。
 
 `Where`、`Select`、`OrderBy` 等通常建立 lazy pipeline；`ToList`、`ToArray`、`ToDictionary`、`Count`、`First`、`Single`、`Any` 等會觸發列舉或查詢。
 

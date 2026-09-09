@@ -54,25 +54,59 @@ var activeNames = await query
 
 對 `IQueryable<T>`，lambda 可能被轉成 `Expression<Func<User, bool>>`。EF Core 解析 expression tree，依 provider 把可翻譯部分轉成 SQL。
 
-## 4. 實務範例：EF Core query 的執行邊界
+## 4. 實務範例：同一張訂單表，三種寫法送出的 SQL
+
+以下三段跑在 EF Core 10 + SQLite，SQL 是實際 log 出來的。
+
+**條件留在資料庫**
 
 ```csharp
-var names = await _context.Users
-    .Where(x => x.IsActive)
-    .Select(x => x.Name)
-    .ToListAsync(cancellationToken);
+var pending = db.Orders
+    .Where(o => !o.Shipped)
+    .Select(o => o.Number)
+    .ToList();
 ```
 
-大致流程：
+```sql
+SELECT "o"."Number"
+FROM "Orders" AS "o"
+WHERE NOT ("o"."Shipped")
+```
+
+篩選和欄位都在資料庫做完，回來的只有需要的那一欄。
+
+**條件寫成 C# method**
+
+```csharp
+static class OrderRules
+{
+    public static bool IsBig(Order o) => o.Amount > 1000m;
+}
+
+db.Orders.Where(o => OrderRules.IsBig(o)).ToList();
+```
 
 ```text
-DbSet<User>（IQueryable<User>）
-    ↓  Where / Select 組成 expression tree
-    ↓  ToListAsync() 觸發 provider
-EF Core 產生 SQL，例如 SELECT Name FROM Users WHERE IsActive = 1
-    ↓  SQL Server 執行
-    ↓  結果 materialize 成 List<string>
+The LINQ expression 'DbSet<Order>()
+    .Where(o => OrderRules.IsBig(o))' could not be translated. Either rewrite the
+query in a form that can be translated, or switch to client evaluation explicitly
+by inserting a call to 'AsEnumerable', 'AsAsyncEnumerable', 'ToList', or 'ToListAsync'.
 ```
+
+EF Core 拿到的是 expression tree，看不進 `IsBig` 的方法內容，翻不出 SQL 就丟 `InvalidOperationException`。條件寫回 lambda（`o => o.Amount > 1000m`）就翻得出來。同樣的邏輯如果寫成 local function，連編譯都不會過：`CS8110 運算式樹狀目錄不可包含區域函式的參考`。
+
+**先 `ToList()` 再篩**
+
+```csharp
+db.Orders.ToList().Where(o => !o.Shipped).ToList();
+```
+
+```sql
+SELECT "o"."Id", "o"."Amount", "o"."Number", "o"."Shipped"
+FROM "Orders" AS "o"
+```
+
+沒有 `WHERE`，整張表拉回記憶體，篩選在 C# 做。三筆資料看不出差別，三十萬筆就是另一回事。`ToList()` 放在哪一行，就是 `IQueryable` 與 `IEnumerable` 的交界。
 
 ### 什麼時候回到 memory？
 
@@ -99,17 +133,6 @@ var result = _context.Users
 使用前要問：你是「不得不使用只能在 C# 執行的邏輯」，還是只是沒查清楚 EF Core 能否翻譯？能在 SQL 做的 filter / projection，通常應留在 `IQueryable` 階段。
 
 ### 常見效能問題
-
-```csharp
-// 不好：先把整張 Users table 載入，再在 memory 過濾。
-var all = await _context.Users.ToListAsync(cancellationToken);
-var active = all.Where(x => x.IsActive).ToList();
-
-// 較好：讓 SQL Server 過濾。
-var active = await _context.Users
-    .Where(x => x.IsActive)
-    .ToListAsync(cancellationToken);
-```
 
 ```csharp
 // 不好：只要 name，卻先載入完整 entity。
