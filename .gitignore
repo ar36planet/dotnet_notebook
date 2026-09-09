@@ -7,3 +7,5 @@ public/
 .quartz-cache/
 prof/
 tsconfig.tsbuildinfo
+
+.claude/settings.local.json
