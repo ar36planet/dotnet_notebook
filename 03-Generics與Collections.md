@@ -43,7 +43,7 @@ var total = users.Count();      // 查一次資料庫
 foreach (var user in users) { } // 再查一次
 ```
 
-回傳 `IEnumerable<T>` 等於說「我給你一份還沒算的東西，你什麼時候列舉，我什麼時候去拿」。上面這段查了兩次資料庫。更麻煩的是，`DbContext` 如果在 controller 用到它之前就被 dispose，`ObjectDisposedException` 會在列舉的那一刻才炸，而 stack trace 指的是 controller，不是那個忘了寫 `ToList` 的 repository。這種東西要找很久。
+回傳 `IEnumerable<T>` 等於說「我給你一份還沒算的東西，你什麼時候列舉，我什麼時候去拿」。上面這段查了兩次資料庫。更麻煩的是，`DbContext` 如果在 controller 用到它之前就被 dispose，`ObjectDisposedException` 會在列舉的那一刻才炸，而 stack trace 指的是 controller，不是那個忘了寫 `ToList` 的 repository。
 
 先查完再回傳，型別也一起換掉：
 
