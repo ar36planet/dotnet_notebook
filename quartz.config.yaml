@@ -12,6 +12,7 @@ configuration:
     - .obsidian
     - examples
     - README.md
+    - AGENTS.md
     - node_modules
     - public
     - .git
