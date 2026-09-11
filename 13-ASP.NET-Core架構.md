@@ -1,6 +1,6 @@
 ---
 title: 13 ASP.NET Core 架構
-tags: [aspnet-core, middleware, web-api, controllers, minimal-api]
+tags: [aspnet-core, middleware, mvc, web-api, controllers, minimal-api]
 ---
 
 # 13 ASP.NET Core 基礎架構
@@ -9,23 +9,28 @@ tags: [aspnet-core, middleware, web-api, controllers, minimal-api]
 
 - 看懂現代 `Program.cs` 的 host、DI 與 middleware pipeline。
 - 串起 request → endpoint → service → repository / HttpClient → DTO → JSON。
-- 分辨 controller 與 Minimal API 的角色，理解它們共享的 ASP.NET Core foundation。
+- 分辨 MVC controller、API controller 與 Minimal API 的角色，理解它們共享的 ASP.NET Core foundation。
+- 知道 MVC HTML rendering 與 Web API JSON response 是兩條不同的 application boundary。
 
 ## 1. 一句話理解
 
-ASP.NET Core app 是由 host 啟動、由 DI 組裝、由 middleware 依序處理 HTTP request，最後把 request routing 到 controller 或 endpoint，再由 framework serialize response 的 pipeline。
+ASP.NET Core app 是由 host 啟動、由 DI 組裝、由 middleware 依序處理 HTTP request，最後把 request routing 到 MVC view、API controller 或 endpoint，再由 framework 產生 HTML 或 JSON response 的 pipeline。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-| ASP.NET Core | Spring Boot 大致對照 |
-| --- | --- |
-| `WebApplicationBuilder` / `WebApplication` | Spring application bootstrap / embedded server |
-| `Program.cs` | `main` + configuration / bean setup 的集中入口 |
-| middleware | filter / interceptor / web middleware |
-| controller | `@RestController` |
-| `builder.Services` | ApplicationContext bean registrations |
-| `appsettings.json` + IConfiguration | `application.yml` / property sources |
-| Minimal API | function-style route handler；不是另一個 runtime |
+只寫 `AddControllers()`，沒有寫 `MapControllers()`，controller 類別雖然已註冊，`GET /api/users/{id}` 仍然找不到 endpoint：
+
+```csharp
+builder.Services.AddControllers();
+
+var app = builder.Build();
+app.MapControllers(); // 把 attribute-routed controller 接進 request pipeline
+app.Run();
+```
+
+ASP.NET Core 的 app 不是一個散落的 controller 集合，而是一條由 host、DI、middleware 和 endpoint 組成的 request pipeline；註冊 service 與 map endpoint 是不同責任。
+
+如果只用 Web API 的 `ControllerBase → Ok → JSON` 來理解 ASP.NET Core，會漏掉 MVC 專案最常見的另一條路：`Controller → ViewModel → Razor View → HTML`。MVC、Razor、表單、validation 和 CRUD 會在 [[13-ASP.NET-Core-MVC與Razor-Views]] 與 [[15-ASP.NET-Core-MVC-CRUD]] 展開。
 
 ## 3. C# 語法
 

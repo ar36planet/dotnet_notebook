@@ -1,0 +1,11 @@
+@model ProductViewModel
+@{
+    ViewData["Title"] = "刪除商品";
+}
+
+<h1>刪除商品</h1>
+<p>確定要刪除「@Model.Name」嗎？</p>
+<form asp-action="Delete" asp-route-id="@Model.Id" method="post">
+    <button type="submit" class="btn btn-danger">確認刪除</button>
+    <a asp-action="Index" class="btn btn-secondary">取消</a>
+</form>

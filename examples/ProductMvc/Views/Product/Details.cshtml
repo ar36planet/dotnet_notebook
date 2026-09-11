@@ -1,0 +1,14 @@
+@model ProductViewModel
+@{
+    ViewData["Title"] = "商品詳細";
+}
+
+<h1>商品詳細</h1>
+<dl class="row">
+    <dt class="col-sm-2">名稱</dt>
+    <dd class="col-sm-10">@Model.Name</dd>
+    <dt class="col-sm-2">價格</dt>
+    <dd class="col-sm-10">@Model.Price.ToString("C2")</dd>
+</dl>
+<a asp-action="Edit" asp-route-id="@Model.Id">編輯</a> |
+<a asp-action="Index">回到清單</a>

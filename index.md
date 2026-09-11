@@ -1,14 +1,14 @@
 ---
-title: Java 開發者轉向現代 C# / .NET / ASP.NET Core
+title: 現代 C# / .NET / ASP.NET Core 學習筆記
 ---
 
-# Java 開發者轉向現代 C# / .NET / ASP.NET Core
+# 現代 C# / .NET / ASP.NET Core 學習筆記
 
-這是一份給有 Java、C#、SQL Server 與 Web API 實務經驗的後端開發者使用的系統化學習筆記。
+這是一份從 C# 型別、集合與 LINQ 開始，逐步走到 ASP.NET Core、SQL Server 與 EF Core 的後端學習筆記。只需要基礎物件導向概念，不預設讀者熟悉其他語言的 API。
 
 學習路線是：
 
-> Java 已經會 → 對照 Java → 補 C# 特有語法 → 理解現代 .NET 慣用方式 → 放進 ASP.NET Core 與 SQL Server 實務情境
+> 先建立 C# 型別模型 → 理解 .NET 慣用 API → 放進 ASP.NET Core 與 SQL Server 實務情境
 
 ## C# / .NET / ASP.NET Core
 
@@ -25,9 +25,12 @@ title: Java 開發者轉向現代 C# / .NET / ASP.NET Core
 - [[11-Stream]]
 - [[12-JSON與序列化]]
 - [[13-ASP.NET-Core架構]]
+- [[13-ASP.NET-Core-MVC與Razor-Views]]
 - [[14-WebApplicationFactory]]
 - [[15-綜合實作]]
+- [[15-ASP.NET-Core-MVC-CRUD]]
 - [[16-面試快速複習]]
+- [[16-ASP.NET-Core-MVC面試實戰]]
 - [[17-學習分級與路線圖]]
 
 ## SQL Server / MSSQL / EF Core
@@ -51,7 +54,7 @@ title: Java 開發者轉向現代 C# / .NET / ASP.NET Core
 
 ## 使用方式
 
-- 先讀每章的「一句話理解」與「Java 對照」。
+- 先讀每章的「一句話理解」與「先看會出事的地方」。
 - 再閱讀 ASP.NET Core / EF Core 的實務範例。
 - 用章末小練習確認自己能不能不查資料寫出來。
 - 面試前快速複習 [[16-面試快速複習]] 與 [[32-MSSQL面試快速複習]]。
