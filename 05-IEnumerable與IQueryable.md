@@ -15,15 +15,26 @@ tags: [csharp, linq, ef-core, sql]
 
 `IEnumerable<T>` 的 query 由 .NET 在記憶體中執行；`IQueryable<T>` 把 query 表達成 provider 可以解析的 expression tree，EF Core 通常把它翻成 SQL，在 `ToListAsync()` 等 terminal operation 才送到資料庫。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-| C# | Java / SQL 世界的直覺 |
-| --- | --- |
-| `IEnumerable<T>` | Java Stream over in-memory collection；LINQ to Objects |
-| `IQueryable<T>` | 比較像「可由 ORM provider 翻譯的 query specification」，不是 Java Stream 的完全等價物 |
-| `Expression<Func<T,bool>>` | 可被檢查結構的 expression tree；不是單純已編譯 function |
-| EF Core | JPA / Hibernate 類似的 ORM，但 query API、tracking 與 translation 細節不同 |
-| `ToListAsync()` | 執行 query、等待 DB 結果、materialize 成記憶體 list |
+訂單表只有三筆時，下面兩段看起來一樣；資料量變成三十萬筆時，第二段會先把整張表拉回應用程式：
+
+```csharp
+// 條件留在資料庫
+var pendingNumbersFromDb = db.Orders
+    .Where(order => !order.Shipped)
+    .Select(order => order.Number)
+    .ToList();
+
+// 先查完整資料，再在記憶體篩選
+var pendingNumbersFromMemory = db.Orders
+    .ToList()
+    .Where(order => !order.Shipped)
+    .Select(order => order.Number)
+    .ToList();
+```
+
+`ToList()` 是兩個世界的交界：在它之前，`IQueryable<T>` 還能讓 EF Core 組合並翻譯查詢；在它之後，資料已經是記憶體中的 `List<T>`，後續 LINQ 在應用程式執行。
 
 ## 3. C# 語法
 

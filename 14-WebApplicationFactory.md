@@ -15,15 +15,16 @@ tags: [aspnet-core, testing, integration-test, xunit]
 
 `WebApplicationFactory<TEntryPoint>` 會在測試 process 中建立測試 host / `TestServer`，讓你用 `HttpClient` 走過 routing、model binding、DI、middleware、serialization 與 endpoint 的整條路徑。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-| .NET | Java / Spring |
-| --- | --- |
-| unit test + mock service | 單獨測 controller / service，類似 Mockito unit test |
-| `WebApplicationFactory` | `@SpringBootTest` / `MockMvc` / random port integration test 的組合概念 |
-| `TestServer` | in-process test server |
-| `factory.CreateClient()` | 測試用 HTTP client |
-| custom factory | 測試 profile / bean override / test container setup |
+只直接呼叫 controller method，測試會通過，但 route constraint、JSON 欄位名稱、DI registration 和 middleware 都沒有被測到：
+
+```csharp
+// 這只測到一個 method，不代表 GET /api/users/{id} 可用
+var result = await controller.Get(userId, CancellationToken.None);
+```
+
+`WebApplicationFactory<Program>` 會啟動測試用 host；用 `CreateClient()` 發 HTTP request，才會走過 routing、model binding、DI、middleware、serialization 和 endpoint。
 
 ## 3. C# 語法
 

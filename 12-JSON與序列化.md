@@ -3,7 +3,7 @@ title: 12 JSON 與序列化
 tags: [aspnet-core, json, serialization, dto, yaml]
 ---
 
-# 12 JSON / YAML Serialization
+# 12 JSON 與序列化
 
 ## 學習目標
 
@@ -15,16 +15,19 @@ tags: [aspnet-core, json, serialization, dto, yaml]
 
 Serialization 把 object 轉成可傳輸或保存的格式；deserialization 把 JSON 等格式轉回 C# object，而 ASP.NET Core 會把這些步驟接進 model binding 與 response formatting。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-| C# / .NET | Java / Spring |
-| --- | --- |
-| `System.Text.Json` | Jackson / Gson 的角色 |
-| `JsonSerializer` | `ObjectMapper` 類似角色 |
-| `[JsonPropertyName]` | `@JsonProperty` |
-| DTO record | Java record / DTO class |
-| model binding | Spring MVC argument binding + Jackson conversion |
-| Newtonsoft.Json | Json.NET；功能成熟、相容性廣，但 ASP.NET Core 預設不是它 |
+直接把 entity 當 response，資料庫欄位會跟著 API 暴露出去；之後新增 `PasswordHash` 或 navigation property，API contract 也可能在不知不覺中改變：
+
+```csharp
+// 不要直接把 persistence entity 回傳給 client
+return Ok(user);
+
+// 只建立 API 需要的 DTO
+return Ok(new UserResponse(user.Id, user.Name, user.CreatedAt));
+```
+
+序列化器只負責把物件轉成 JSON，不會替你判斷哪些欄位可以公開。DTO 先隔離 API contract，命名與 nullable 行為再由 serializer options 明確設定。
 
 ## 3. C# 語法
 
@@ -127,7 +130,7 @@ YAML 常見於 deployment / configuration / human-authored files；HTTP public A
 
 - DTO 不是單純為了「讓 JSON 長得漂亮」；它隔離外部 contract 與 domain / persistence model。
 - nullable compiler warning 不等於 serializer 一定會拒絕 null；必須設定與 validation policy。
-- JSON property name mapping 不是 JavaScript 自動魔法；要看 naming policy、attribute 與 serializer options。
+- JSON property name mapping 不是序列化器自動猜對所有契約；要看 naming policy、attribute 與 serializer options。
 - `System.Text.Json` 與 Newtonsoft.Json 的 default behavior 不完全相同，尤其是 constructor、polymorphism、reference handling。
 - 不要把 entity 直接 expose 給 API；navigation properties 可能造成循環、過度傳輸或資料洩漏。
 

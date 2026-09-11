@@ -7,7 +7,7 @@ tags: [csharp, stream, io, aspnet-core, upload]
 
 ## 學習目標
 
-- 從 Java `InputStream` / `OutputStream` 理解 .NET `Stream`。
+- 讀懂 .NET `Stream` 如何依序處理 bytes。
 - 讀懂 `FileStream`、`MemoryStream`、HTTP content stream 的共同 abstraction。
 - 在 ASP.NET Core 處理檔案上傳時使用 async copy 與 cancellation。
 
@@ -15,15 +15,20 @@ tags: [csharp, stream, io, aspnet-core, upload]
 
 `Stream` 是「依序讀取或寫入 bytes」的抽象；它讓同一套 API 可以處理檔案、記憶體、network body、request body 與 response body。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-| C# | Java |
-| --- | --- |
-| `Stream` | `InputStream` / `OutputStream` 的共同概念，但 C# 同一型別同時提供 Read / Write 能力（實作可唯讀或唯寫） |
-| `FileStream` | `FileInputStream` / `FileOutputStream` |
-| `MemoryStream` | `ByteArrayInputStream` / `ByteArrayOutputStream` |
-| `CopyToAsync` | loop read/write 或 transfer 類似的非同步抽象 |
-| `IFormFile.OpenReadStream()` | multipart file part 的 input stream |
+寫入記憶體 stream 後直接讀，讀取位置仍在尾端，結果會是空資料：
+
+```csharp
+await using var memory = new MemoryStream();
+await memory.WriteAsync("訂單 1001"u8.ToArray());
+
+memory.Position = 0;
+using var reader = new StreamReader(memory);
+Console.WriteLine(await reader.ReadToEndAsync());
+```
+
+`Stream` 是依序讀寫 bytes 的抽象；寫完要從頭讀時，seekable stream 通常要把 `Position` 設回 `0`。network stream 不一定支援 seek，不能假設所有 stream 都能倒帶。
 
 ## 3. C# 語法
 

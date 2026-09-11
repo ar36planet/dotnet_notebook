@@ -1,54 +1,56 @@
 ---
 title: 04 LINQ
-tags: [csharp, linq, java-stream, collections]
+tags: [csharp, linq, collections]
 ---
 
-# 04 LINQ：從 Java Stream API 轉過來
+# 04 LINQ：把一串資料處理成結果
 
 ## 學習目標
 
-- 把 Java Stream 的 filter / map / collect 對應到 LINQ。
+- 用 LINQ 篩選、排序、分組，並把 entity 轉成 DTO。
 - 理解 extension method、deferred execution 與 terminal operation。
 - 讀懂 Web API service 中常見的資料篩選與 DTO projection。
 
 ## 1. 一句話理解
 
-LINQ 是把查詢與轉換操作整合進 C# 的一組語法與 API；你可以用幾乎相同的 pipeline 思維處理 in-memory collection 或由 provider 翻譯的資料來源。
+LINQ 是把查詢與轉換操作整合進 C# 的一組語法與 API；同一條 pipeline 可以處理記憶體中的集合，也可以交給資料來源 provider 翻譯。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-Java：
-
-```java
-var result = users.stream()
-    .filter(User::isActive)
-    .map(u -> new UserDto(u.id(), u.name()))
-    .toList();
-```
-
-C#：
+帳號 email 應該唯一，卻寫成 `First` 時，重複資料不會立刻被發現：
 
 ```csharp
-var result = users
-    .Where(x => x.IsActive)
-    .Select(x => new UserDto(x.Id, x.Name))
-    .ToList();
+var accounts = new List<Account>
+{
+    new(1, "ada@example.com"),
+    new(2, "ada@example.com"),
+};
+
+var account = accounts.First(a => a.Email == "ada@example.com");
+Console.WriteLine(account.Id); // 1：重複資料被悄悄忽略
+
+try
+{
+    accounts.Single(a => a.Email == "ada@example.com");
+}
+catch (InvalidOperationException ex)
+{
+    Console.WriteLine(ex.Message);
+}
+
+public sealed record Account(int Id, string Email);
 ```
 
-核心對照：
+實際輸出：
 
-| Java Stream | C# LINQ |
-| --- | --- |
-| `filter` | `Where` |
-| `map` | `Select` |
-| `flatMap` | `SelectMany` |
-| `sorted` | `OrderBy` / `ThenBy` |
-| `collect(toList())` | `ToList()` |
-| `anyMatch` | `Any` |
-| `allMatch` | `All` |
-| `findFirst` | `First` / `FirstOrDefault` |
-| `findOne` 自行限制 | `Single` / `SingleOrDefault` |
-| `Collectors.groupingBy` | `GroupBy` / `ToLookup` |
+```text
+1
+Sequence contains more than one matching element
+```
+
+如果「最多只能有一筆」是資料規則，應寫成 `Single`。規則被破壞時，程式要在查詢這一行停下來，而不是讓後面的程式拿到不確定的帳號。
+
+`First` 表示「至少一筆，拿第一筆」；`Single` 表示「剛好一筆」。LINQ 方法不是越嚴格越好，而是要寫出資料的真實假設。
 
 ## 3. C# 語法
 
@@ -110,7 +112,7 @@ var allRoles = users
     .ToList();
 ```
 
-它把每個 user 的 nested collection 展平成一條序列，概念上對應 Java `flatMap`。
+它把每個 user 的巢狀集合展平成一條序列。
 
 ### LINQ 是 extension method
 
@@ -185,6 +187,6 @@ Console.WriteLine(checkCount);      // 6
 
 ## 7. 小練習
 
-1. 把 Java `filter → map → toList` 改成 C# LINQ。
-2. 何時用 `SingleOrDefault` 而不是 `FirstOrDefault`？
-3. 寫一段 LINQ，把每個 user 的 roles flatten 後去重並排序。
+1. 何時用 `SingleOrDefault` 而不是 `FirstOrDefault`？
+2. 寫一段 LINQ，把每個 user 的 roles 展平後去重並排序。
+3. 把 `ToList()` 移到 deferred query 的不同位置，預測每次列舉會看到哪些訂單。

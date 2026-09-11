@@ -15,16 +15,17 @@ tags: [aspnet-core, http, httpclient, json]
 
 `HttpClient` 是 HTTP API 的高階 client；`IHttpClientFactory` 把 client 的設定、handler lifetime、logging 與 DI wiring 集中管理，避免手動建立 client 造成 socket / DNS 問題。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-| C# | Java 大致對應 |
-| --- | --- |
-| `HttpClient` | Java `HttpClient`、Spring `RestClient` / `WebClient` |
-| `IHttpClientFactory` | Spring `WebClient.Builder`、集中管理的 HTTP client factory |
-| typed client | 以 class 封裝一個外部 API client，類似 declarative client 的 adapter |
-| `HttpRequestMessage` | `HttpRequest` |
-| `HttpResponseMessage` | `HttpResponse` |
-| `GetFromJsonAsync<T>` | 送 GET 並直接 deserialize 成 `T` |
+每個 request 都 `new HttpClient()`，短時間測試看不出差別；流量上來後，連線無法穩定重用，還可能遇到 socket exhaustion。問題在 client 的建立與 handler lifetime，不在 GET 語法：
+
+```csharp
+// 不要在每個 request 中反覆建立並 dispose HttpClient
+using var client = new HttpClient();
+var response = await client.GetAsync("https://profiles.example.com/users/1");
+```
+
+ASP.NET Core 以 `IHttpClientFactory` 管理 handler lifetime、集中設定與 DI wiring；application code 再用 typed client 把外部 API 的路徑與回應型別包起來。
 
 ## 3. C# 語法
 

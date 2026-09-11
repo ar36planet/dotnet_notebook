@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "01-型別與值語意.md",
-                "mode": "preview",
+                "file": "index.md",
+                "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "01-型別與值語意"
+              "title": "index"
             }
           }
         ]
@@ -41,7 +41,9 @@
               "type": "file-explorer",
               "state": {
                 "sortOrder": "alphabetical",
-                "autoReveal": false
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
               },
               "icon": "lucide-folder-closed",
               "title": "檔案瀏覽器"
@@ -94,7 +96,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "01-型別與值語意.md",
+                "file": "02-型別設計.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +106,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "01-型別與值語意 的反向連結"
+              "title": "02-型別設計 的反向連結"
             }
           },
           {
@@ -113,12 +115,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "01-型別與值語意.md",
+                "file": "02-型別設計.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "01-型別與值語意 的對外連結"
+              "title": "02-型別設計 的對外連結"
             }
           },
           {
@@ -156,13 +158,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "01-型別與值語意.md",
+                "file": "02-型別設計.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "01-型別與值語意 的大綱"
+              "title": "02-型別設計 的大綱"
             }
           }
         ]
@@ -185,6 +187,8 @@
   },
   "active": "b7862bd00d649e1d",
   "lastOpenFiles": [
+    "02-型別設計.md",
+    "01-型別與值語意.md",
     "public/quartz/static/giscus/light.css",
     "public/quartz/static/giscus/dark.css",
     "public/quartz/plugins/transformers/index.ts",
@@ -195,7 +199,6 @@
     "public/quartz/plugins/pagetypes/404.ts",
     "public/quartz/plugins/loader/types.ts",
     "public/quartz/plugins/loader/install-plugins.ts",
-    "public/quartz/plugins/loader/index.ts",
     "public/quartz/static/og-image.png",
     "public/quartz/static/icon.png",
     "public/static/og-image.png",
@@ -224,7 +227,6 @@
     "node_modules/content-disposition/README.md",
     "node_modules/yargs-parser/README.md",
     "node_modules/yargs-parser/CHANGELOG.md",
-    "node_modules/cliui/README.md",
     "quartz/static/og-image.png",
     "quartz/static/icon.png"
   ]

@@ -1,13 +1,13 @@
 ---
 title: 09 Dependency Injection
-tags: [aspnet-core, di, ioc, spring]
+tags: [aspnet-core, di, ioc]
 ---
 
-# 09 Dependency Injection：從 Spring DI 到 ASP.NET Core
+# 09 Dependency Injection：讓物件依賴由組裝處理
 
 ## 學習目標
 
-- 用 Spring `@Service` / `@Autowired` 經驗理解 ASP.NET Core built-in DI。
+- 看懂 ASP.NET Core built-in DI 如何建立物件。
 - 分辨 constructor injection、IoC container 與 service lifetime。
 - 知道 Singleton / Scoped / Transient 的實際風險。
 
@@ -15,38 +15,21 @@ tags: [aspnet-core, di, ioc, spring]
 
 ASP.NET Core DI container 依照你在 `Program.cs` 設定的 contract 與 lifetime 建立物件，並把 constructor 需要的 dependencies 自動注入，讓 class 不必自己 `new` 它的 collaborators。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-Java Spring：
-
-```java
-@Service
-public class UserService {
-    private final UserRepository repository;
-
-    @Autowired
-    public UserService(UserRepository repository) {
-        this.repository = repository;
-    }
-}
-```
-
-ASP.NET Core：
+`DbContext` 是 scoped，卻被 singleton service 保存起來，第一個 request 結束後，下一個 request 可能拿到已經失效或不該共用的資料庫物件。問題不在 interface，而在 lifetime：
 
 ```csharp
-builder.Services.AddScoped<IUserService, UserService>();
-builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddSingleton<ReportCache>();
+builder.Services.AddScoped<AppDbContext>();
 
-public sealed class UserController : ControllerBase
+public sealed class ReportCache(AppDbContext db)
 {
-    private readonly IUserService _userService;
-
-    public UserController(IUserService userService)
-        => _userService = userService;
+    // singleton capture scoped dependency：錯誤的依賴方向
 }
 ```
 
-Java annotation 常放在 implementation class；ASP.NET Core 常把 registration 集中在 `Program.cs` 或 extension method。兩者都是 IoC：object construction / wiring 的控制權交給 container。
+DI container 依照 registration 建立 dependency graph；每個 service 的 lifetime 必須能容納它依賴的物件。`DbContext` 通常跟著 request scope，使用它的 application service 也通常是 scoped。
 
 ## 3. C# 語法
 
@@ -84,7 +67,7 @@ public sealed class UserService(
 }
 ```
 
-上面使用 primary constructor（C# 12）。為了讓 Java 開發者先看懂，也可以寫成傳統形式：
+上面使用 primary constructor（C# 12）。如果需要明確看到欄位，也可以寫成傳統形式：
 
 ```csharp
 public sealed class UserService : IUserService
@@ -167,7 +150,7 @@ builder.Services.AddUserModule();
 - `Scoped` 不是「整個 application 一份」，而是每個 scope 一份；web request 通常各自有 scope。
 - `Singleton` 不自動代表 thread-safe。
 - constructor injection 的 interface 不會自動讓 class 好測；仍要有清楚的 contract 與 side effect boundary。
-- `AddScoped<I, Impl>()` 是把 service type 與 implementation type 綁在一起，不是 Java interface 的 runtime magic。
+- `AddScoped<I, Impl>()` 是把 service contract 與 implementation 綁在一起；它不會替你修正錯誤的 lifetime 設計。
 
 ## 6. 面試怎麼回答
 

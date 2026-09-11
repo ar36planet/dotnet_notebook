@@ -15,9 +15,22 @@ tags: [aspnet-core, cancellation, async, http]
 
 `CancellationToken` 是「請你在安全的檢查點停止」的通知管道；它不會強制終止 thread，而是讓每一層合作地停止不再需要的工作。
 
-## 2. Java 對照
+## 2. 先看會出事的地方
 
-Java 沒有完全相同、由 framework 到每個 API 顯式傳遞的標準型別。`CompletableFuture.cancel(true)`、thread interrupt、timeout 等有部分相似目的，但 C# 的慣用方式是把 `CancellationToken` 當成 method parameter，從 boundary 傳到 I/O operation。
+使用者關閉訂單查詢頁後，server 仍可能繼續查資料庫、呼叫外部 API，最後才發現 response 已經沒有接收者。只在 controller 宣告 token 還不夠，必須把同一個 token 傳進每一個支援取消的 I/O：
+
+```csharp
+public async Task<IReadOnlyList<Order>> GetOrdersAsync(
+    Guid userId,
+    CancellationToken cancellationToken)
+{
+    return await _db.Orders
+        .Where(order => order.UserId == userId)
+        .ToListAsync(cancellationToken);
+}
+```
+
+`CancellationToken` 是「請在安全檢查點停止」的通知，不是強制 kill thread。底層 API 不接收 token，就不會因為 caller 取消而自動停止。
 
 ## 3. C# 語法
 
