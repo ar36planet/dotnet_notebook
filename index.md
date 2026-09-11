@@ -32,6 +32,9 @@ title: 現代 C# / .NET / ASP.NET Core 學習筆記
 - [[16-面試快速複習]]
 - [[16-ASP.NET-Core-MVC面試實戰]]
 - [[17-學習分級與路線圖]]
+- [[34-Docker與.NET-Container]]
+- [[35-Docker-Compose-ASP.NET-Core與SQL-Server]]
+- [[36-ASP.NET-Core與Redis分散式快取]]
 
 ## SQL Server / MSSQL / EF Core
 

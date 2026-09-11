@@ -75,6 +75,9 @@ tags: [csharp, dotnet, aspnet-core, learning]
 | 31 | [[31-User-Order整合實作]] | 完成 Users / Orders / OrderItems 整合設計 |
 | 32 | [[32-MSSQL面試快速複習]] | 快速回答 SQL、Index、Transaction、EF Core 題 |
 | 33 | [[33-MSSQL學習優先級]] | 排定 A / B / C 學習優先級 |
+| 34 | [[34-Docker與.NET-Container]] | 用 .NET 10 multi-stage Dockerfile 建立可部署 image |
+| 35 | [[35-Docker-Compose-ASP.NET-Core與SQL-Server]] | 用 Compose 串起 ASP.NET Core、frontend、SQL Server 和 volume |
+| 36 | [[36-ASP.NET-Core與Redis分散式快取]] | 使用 Redis、IDistributedCache、TTL 和 cache-aside |
 | 99 | [[99-參考資料]] | 依章節快速找到官方文件與補充書籍 |
 
 ## C# → ASP.NET Core 知識地圖
