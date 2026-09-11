@@ -78,6 +78,7 @@ tags: [csharp, dotnet, aspnet-core, learning]
 | 34 | [[34-Docker與.NET-Container]] | 用 .NET 10 multi-stage Dockerfile 建立可部署 image |
 | 35 | [[35-Docker-Compose-ASP.NET-Core與SQL-Server]] | 用 Compose 串起 ASP.NET Core、frontend、SQL Server 和 volume |
 | 36 | [[36-ASP.NET-Core與Redis分散式快取]] | 使用 Redis、IDistributedCache、TTL 和 cache-aside |
+| 37 | [[37-RabbitMQ與ASP.NET-Core非同步訊息]] | 使用 RabbitMQ、ack、publisher confirms、retry 和 outbox |
 | 99 | [[99-參考資料]] | 依章節快速找到官方文件與補充書籍 |
 
 ## C# → ASP.NET Core 知識地圖

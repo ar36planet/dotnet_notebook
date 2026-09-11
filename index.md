@@ -35,6 +35,7 @@ title: 現代 C# / .NET / ASP.NET Core 學習筆記
 - [[34-Docker與.NET-Container]]
 - [[35-Docker-Compose-ASP.NET-Core與SQL-Server]]
 - [[36-ASP.NET-Core與Redis分散式快取]]
+- [[37-RabbitMQ與ASP.NET-Core非同步訊息]]
 
 ## SQL Server / MSSQL / EF Core
 
