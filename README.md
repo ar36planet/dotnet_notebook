@@ -79,6 +79,8 @@ tags: [csharp, dotnet, aspnet-core, learning]
 | 35 | [[35-Docker-Compose-ASP.NET-Core與SQL-Server]] | 用 Compose 串起 ASP.NET Core、frontend、SQL Server 和 volume |
 | 36 | [[36-ASP.NET-Core與Redis分散式快取]] | 使用 Redis、IDistributedCache、TTL 和 cache-aside |
 | 37 | [[37-RabbitMQ與ASP.NET-Core非同步訊息]] | 使用 RabbitMQ、ack、publisher confirms、retry 和 outbox |
+| 38 | [[38-Kubernetes部署ASP.NET-Core微服務]] | 用 Deployment、Service、probes 和 DNS 部署微服務 |
+| 39 | [[39-Kubernetes-HPA與VPA]] | 理解 autoscaling/v2、metrics-server、HPA 與 VPA |
 | 99 | [[99-參考資料]] | 依章節快速找到官方文件與補充書籍 |
 
 ## C# → ASP.NET Core 知識地圖
