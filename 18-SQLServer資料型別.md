@@ -7,7 +7,7 @@ tags: [sql-server, mssql, data-types, csharp, ef-core]
 
 ## 學習目標
 
-- 從 application / EF Core 邊界理解 SQL Server type，而不是只背名稱。
+- 從應用程式與 EF Core 邊界理解 SQL Server 型別，而不只是背名稱。
 - 能在 `varchar`、`nvarchar`、`datetime2`、`datetimeoffset`、`decimal(p,s)` 之間做合理選擇。
 - 知道 SQL Server type 與 C# type 不是一對一轉換。
 
@@ -18,18 +18,17 @@ tags: [sql-server, mssql, data-types, csharp, ef-core]
 ## 2. 實際 SQL
 
 ```sql
-CREATE TABLE Users
+CREATE TABLE Orders
 (
-    Id              uniqueidentifier NOT NULL,
-    DisplayName     nvarchar(200) NOT NULL,
-    LegacyCode      varchar(20) NULL,
-    ShortLabel      char(8) NULL,
-    Balance         decimal(19, 4) NOT NULL,
-    IsActive        bit NOT NULL,
-    CreatedAt       datetime2(7) NOT NULL,
-    OccurredAt      datetimeoffset(7) NULL,
-    Avatar          varbinary(max) NULL,
-    CONSTRAINT PK_Users PRIMARY KEY (Id)
+    OrderId         uniqueidentifier NOT NULL,
+    InvoiceNo       varchar(20) NULL,
+    CustomerName    nvarchar(200) NOT NULL,
+    Amount          decimal(19, 4) NOT NULL,
+    IsPaid          bit NOT NULL,
+    OrderedAt       datetime2(7) NOT NULL,
+    PaidAt          datetimeoffset(7) NULL,
+    ReceiptPdf      varbinary(max) NULL,
+    CONSTRAINT PK_Orders PRIMARY KEY (OrderId)
 );
 ```
 
@@ -40,16 +39,16 @@ CREATE TABLE Users
 | `int` | `int` | 32-bit signed integer |
 | `bigint` | `long` | 64-bit signed integer |
 | `bit` | `bool` | SQL `NULL` 時 C# 通常是 `bool?` |
-| `varchar(n)` | `string` | 非 Unicode；實際 encoding / collation 由 DB 設定 |
-| `nvarchar(n)` | `string` | Unicode；C# `string` 本身不標示 varchar / nvarchar |
+| `varchar(n)` | `string` | 依 collation 決定編碼；SQL Server 2019+ 的 `_UTF8` collation 可存完整 Unicode，`n` 是 bytes |
+| `nvarchar(n)` | `string` | UTF-16 byte-pair；C# `string` 本身不標示 varchar / nvarchar |
 | `uniqueidentifier` | `Guid` | SQL NULL 時為 `Guid?` |
 | `datetime` | `DateTime` | 精度與範圍比 `datetime2` 舊且窄 |
 | `datetime2` | `DateTime` | 沒有 offset / timezone |
 | `datetimeoffset` | `DateTimeOffset` | 保存 offset，仍不等於完整 time zone |
 | `decimal(p,s)` | `decimal` | precision / scale 要另外設定 |
-| `varbinary(n/max)` | `byte[]` / `Stream` | 大 payload 不一定適合一次載入 byte[] |
+| `varbinary(n/max)` | `byte[]`（EF Core） | 大檔案串流要在 ADO.NET 用 `SqlDataReader.GetStream()` + `SequentialAccess` |
 
-## 3. 執行結果
+## 3. 查詢結果（預期輸出）
 
 ```sql
 SELECT
@@ -59,7 +58,14 @@ SELECT
     DATALENGTH(CAST('A' AS varchar(4))) AS VariableBytes;
 ```
 
-概念結果：`char(4)` 會以固定長度儲存，`varchar(4)` 只儲存實際長度。固定長度對真正固定寬度的 code / flag 有意義；一般名稱、email、URL 多使用 `varchar` / `nvarchar`。
+預期結果（需在指定 SQL Server build 執行後核對）：
+
+```text
+FixedText  VariableText  FixedBytes  VariableBytes
+A          A             4           1
+```
+
+`char(4)` 固定使用 4 bytes；`varchar(4)` 的 `4` 是 bytes 上限，實際值只有 1 byte。長度固定的代碼欄位才用 `char`；一般名稱、email、URL 依 Unicode 與 collation 需求選擇可變長度型別。
 
 ```sql
 SELECT
@@ -67,18 +73,25 @@ SELECT
     CAST('2026-09-08 10:20:30.1234567 +08:00' AS datetimeoffset(7)) AS WithOffset;
 ```
 
-`datetime2` 只保存日期與時間；`datetimeoffset` 額外保存 `+08:00` 這類 offset。SQL Server 的 `datetime` 精度約為 3.33 milliseconds；`datetime2` 可到 100 nanoseconds 的 precision（依 scale）。
+預期結果：
+
+```text
+LocalLikeTime                  WithOffset
+2026-09-08 10:20:30.1234567    2026-09-08 10:20:30.1234567 +08:00
+```
+
+`datetime2` 只保存日期與時間；`datetimeoffset` 額外保存 `+08:00` 這類 offset。`datetime` 的小數秒只會落在 `.000`、`.003`、`.007`；`23:59:59.999` 會捨入成隔天 `00:00:00.000`。`datetime2(7)` 精度是 100 nanoseconds；`datetime`、`datetime2`、`datetimeoffset` 的儲存大小也會依型別與 scale 不同。
 
 ## 4. SQL Server 背後大概做什麼
 
 ### `varchar` vs `nvarchar`
 
-- `varchar` 是非 Unicode 字串，容量與 collation / code page 有關。
-- `nvarchar` 是 Unicode 字串，中文、多語言、跨系統資料通常較安全。
+- `varchar` 依 collation 決定編碼；傳統定序受 code page 限制，SQL Server 2019+ 使用 `_UTF8` 定序時可存完整 Unicode，但 `varchar(n)` 的 `n` 是 bytes。UTF-8 定序下中文一字約 3 bytes，`varchar(20)` 不能當成可放 20 個中文字。
+- `nvarchar` 使用 UTF-16 byte-pair；增補字元（例如部分 emoji）可能佔兩個 byte-pair。跨系統資料若沒有明確 UTF-8 contract，使用 `nvarchar` 通常較直接。
 - SQL literal 使用 `N'中文'` 才明確表示 Unicode：
 
 ```sql
-SELECT * FROM Users WHERE DisplayName = N'小明';
+SELECT * FROM Orders WHERE CustomerName = N'小明';
 ```
 
 不要把「所有欄位都用 `nvarchar(max)`」當成 Unicode 最佳實務；長度、索引能力、row size、memory 與資料品質仍需設計。
@@ -97,11 +110,11 @@ SELECT * FROM Users WHERE DisplayName = N'小明';
 
 ### `decimal(p,s)`
 
-`p` 是總有效位數，`s` 是小數位數。`decimal(19,4)` 最多 15 位整數 + 4 位小數，不是「19 位整數」。金額、匯率、計算結果優先使用 `decimal`，不要用 `float` / `real` 期待精確金額。
+`p` 是總有效位數，`s` 是小數位數。`decimal(19,4)` 最多 15 位整數 + 4 位小數，不是「19 位整數」。金額、匯率、計算結果優先使用 `decimal`；`float`／`real` 是近似值，不要拿來做需要精確結果的金額或 `=` 比較。`text`／`ntext`／`image` 已宣告將移除，新開發改用 `(n)varchar(max)`／`varbinary(max)`。
 
 ### `uniqueidentifier`
 
-它是 16-byte GUID。適合 distributed ID、外部不可猜測的 identifier，但隨機 GUID 當 clustered key 可能造成 page split / fragmentation；要依 workload 考慮 sequential ID、clustered key 與 public ID 是否分離。
+它是 16-byte GUID，適合跨服務產生的識別碼。隨機 GUID 當 clustered key 會造成隨機插入與 page split；EF Core SQL Server provider 對 `Guid` 主鍵預設產生循序 GUID。自己指定 `Guid.NewGuid()` 或 SQL Server `NEWID()` 才會改成隨機值；若要對外不可猜測，可把內部循序 key 與 public ID 分開。
 
 ### NULL
 
@@ -110,44 +123,43 @@ SELECT * FROM Users WHERE DisplayName = N'小明';
 ## 5. 與 C# / EF Core 的關聯
 
 ```csharp
-public sealed class User
+public sealed class Order
 {
-    public Guid Id { get; set; }
-    public required string DisplayName { get; set; }
-    public decimal Balance { get; set; }
-    public bool IsActive { get; set; }
-    public DateTime CreatedAt { get; set; }
-    public DateTimeOffset? OccurredAt { get; set; }
+    public Guid OrderId { get; set; }
+    public required string CustomerName { get; set; }
+    public decimal Amount { get; set; }
+    public bool IsPaid { get; set; }
+    public DateTime OrderedAt { get; set; }
+    public DateTimeOffset? PaidAt { get; set; }
 }
 ```
 
 EF Core model configuration：
 
 ```csharp
-modelBuilder.Entity<User>(entity =>
+modelBuilder.Entity<Order>(entity =>
 {
-    entity.Property(x => x.DisplayName)
+    entity.Property(x => x.CustomerName)
         .HasMaxLength(200)
         .IsUnicode(true); // nvarchar(200)
 
-    entity.Property(x => x.Balance)
+    entity.Property(x => x.Amount)
         .HasPrecision(19, 4);
 
-    entity.Property(x => x.OccurredAt)
+    entity.Property(x => x.PaidAt)
         .HasColumnType("datetimeoffset(7)");
 });
 ```
 
-C# `string` 不會自動告訴 EF Core 你要 `varchar` 還是 `nvarchar`；provider convention、`IsUnicode`、column type 與 migration 決定實際 schema。C# nullable `DateTimeOffset?` 對應可 NULL 的 `datetimeoffset`，但資料庫既有 schema 仍需要 migration 與驗證。
+`string` 預設對應 `nvarchar(max)`；要 `varchar` 必須用 `.IsUnicode(false)` 或 `HasColumnType`，然後產生 migration。C# nullable `DateTimeOffset?` 對應可 NULL 的 `datetimeoffset`，但資料庫既有 schema 仍需要 migration 與驗證。EF Core SQL Server provider 的 `decimal` 預設是 `decimal(18,2)`，金額或匯率應明確設定 precision，否則 migration 會警告值可能被截斷。
+
+其他常見預設對應是 `DateTime` → `datetime2(7)`、`DateOnly` → `date`、`TimeOnly` → `time`、`byte[]` → `varbinary(max)`；migration 產出的 column type 才是最後要驗證的 schema。
 
 ## 6. 常見誤區
 
-- `nvarchar` 不是「比較安全所以永遠全部使用」；索引 key size、容量與 collation 仍重要。
-- `datetime2` 不帶 timezone；它不像 C# `DateTimeOffset`。
-- `decimal(10,2)` 不是 10 位整數 + 2 位小數，而是總共 10 位有效數字。
-- `uniqueidentifier` 不代表天然適合 clustered index；寫入順序與 page locality 仍要考慮。
-- C# `DateTime`、SQL `datetime`、SQL `datetime2` 的精度與範圍並不完全相同。
-- `NULL` 不要在 application layer 偷換成 magic value，除非 domain 明確定義那個值。
+- C# `DateTime.MinValue` 是西元 1 年；寫入 SQL `datetime`（起始年份 1753）會失敗，schema 與 application 的範圍要一起驗證。
+- SQL `NULL` 不要在應用層偷換成 0、空字串或 `Guid.Empty`，除非領域明確定義那個特殊值。
+- SQL Server migration 對未設定 precision 的 `decimal` 可能使用 `decimal(18,2)`；金額與匯率要在 Fluent API 明確設定。
 
 ## 7. 面試回答
 
