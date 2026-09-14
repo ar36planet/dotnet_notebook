@@ -22,22 +22,39 @@ Lock 是資料庫保護 shared state 的機制；blocking 是一個 transaction 
 ```text
 Shared (S)：讀取資料；多個 reader 通常可以共存
 Exclusive (X)：修改資料；與其他衝突 lock 互斥
-Update (U)：準備更新，減少 read-then-update 的部分 deadlock
-Intent：表示較大層級資源內有 row / page lock
+Update (U)：準備更新；與 S 相容，但同一資源一次只能有一個 U，降低 S→X conversion deadlock
+Intent：表示打算在下層資源取得 S／U／X，例如 IS、IU、IX、SIX
 ```
 
-用兩個 SSMS sessions 示意 blocking：
+用兩個 SSMS sessions 示意 blocking（先在測試 database 執行一次）：
 
 ```sql
+IF OBJECT_ID('dbo.Accounts', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.Accounts
+    (
+        Id int NOT NULL CONSTRAINT PK_Accounts PRIMARY KEY,
+        DisplayName varchar(100) NOT NULL,
+        Balance decimal(18,2) NOT NULL,
+        Version rowversion NOT NULL
+    );
+
+    INSERT dbo.Accounts (Id, DisplayName, Balance)
+    VALUES (1, 'Ada', 100.00), (2, 'Grace', 100.00);
+END;
+```
+
+```sql
+-- 前置條件：Accounts(Id int PRIMARY KEY, DisplayName varchar(100), Balance decimal(18,2))
 -- Session A
 BEGIN TRANSACTION;
-UPDATE Users SET Name = 'Ada v2' WHERE Id = 1;
+UPDATE Accounts SET DisplayName = 'Ada v2' WHERE Id = 1;
 -- 不要先 COMMIT
 ```
 
 ```sql
--- Session B：可能等待 A 的 X lock
-SELECT * FROM Users WHERE Id = 1;
+-- Session B：locking READ COMMITTED 下等待 A 的 X lock
+SELECT * FROM Accounts WITH (READCOMMITTEDLOCK) WHERE Id = 1;
 ```
 
 ## 3. 執行結果
@@ -52,9 +69,41 @@ UPDATE User 1 取得 X lock             UPDATE User 2 取得 X lock
         └──────────── cycle ──────────────┘
 ```
 
-SQL Server 會偵測 cycle，選擇一個 deadlock victim，通常回傳 error 1205；另一個 transaction 才能繼續。這不是「SQL Server 壞掉」，而是 application 的 lock ordering / transaction design 產生了 concurrency conflict。
+SQL Server 會偵測循環，選擇一個 deadlock victim，回傳 error 1205；另一個 transaction 才能繼續。這類死結通常來自應用程式的資源存取順序或交易範圍設計。
 
-## 4. SQL Server 背後大概做什麼
+SQL Server 2025／部分 Azure SQL 可啟用 optimized locking，row／page X lock 的生命週期與 DMV wait type 可能不同；診斷時先查 `is_optimized_locking_on` 與 `is_read_committed_snapshot_on`。
+
+可重現的兩個 session 順序：
+
+```sql
+-- Session A
+SET DEADLOCK_PRIORITY LOW;
+BEGIN TRANSACTION;
+UPDATE dbo.Accounts SET Balance = Balance - 10 WHERE Id = 1;
+WAITFOR DELAY '00:00:05';
+UPDATE dbo.Accounts SET Balance = Balance - 10 WHERE Id = 2;
+ROLLBACK;
+```
+
+```sql
+-- Session B：和 A 相反的鎖定順序
+SET DEADLOCK_PRIORITY HIGH;
+BEGIN TRANSACTION;
+UPDATE dbo.Accounts SET Balance = Balance - 10 WHERE Id = 2;
+WAITFOR DELAY '00:00:05';
+UPDATE dbo.Accounts SET Balance = Balance - 10 WHERE Id = 1;
+ROLLBACK;
+```
+
+預期錯誤（需在 SQL Server 執行後核對）：
+
+```text
+Error 1205: Transaction (Process ID ...) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.
+```
+
+`DEADLOCK_PRIORITY` 先決定 victim；同優先權時 SQL Server 會比較回滾成本。priority 只改重要性，不會消除死結。
+
+## 4. 診斷目前的封鎖
 
 診斷方向：
 
@@ -78,7 +127,11 @@ WHERE r.blocking_session_id <> 0;
 - 讓 predicate 有合理 index，避免為找一筆 row 掃大量資料並鎖更多資源。
 - 避免不必要的 `SERIALIZABLE`、`HOLDLOCK` 與過度寬的 lock hint。
 - 讀 workload 可評估 row-versioning isolation（RCSI / SNAPSHOT），但先理解 tempdb、consistency 與 update conflict。
-- 對 deadlock error 做有限次、有 jitter 的 retry；retry 不應掩蓋 root cause，也要確認 operation 是否可安全重試。
+- 辨識 SQL Server 1205 後，建立新 transaction、重跑整個資料庫工作單元；限制次數並使用 exponential backoff + jitter，資料庫外副作用要有 idempotency／outbox。
+
+RCSI 與 SNAPSHOT 不同：RCSI 是 statement-start snapshot，`READ COMMITTED` 讀取通常不等 writer；SNAPSHOT 是 transaction-start snapshot，需要 `ALLOW_SNAPSHOT_ISOLATION ON`，寫入衝突可能得到 error 3960。兩者都不會取消資料修改所需的 locks。
+
+DMV 只能看目前的等待；死結發生後應查 `system_health` Extended Events 的 `xml_deadlock_report`，讀取 `victim-list`、`process-list`、`resource-list`、`priority` 與 `logused`。`sys.dm_exec_requests` 查詢也要搭配 `sys.dm_exec_sessions`／`sys.dm_exec_input_buffer` 找 sleeping head blocker，不能只看被擋的 request。
 
 ## 5. 與 C# / EF Core 的關聯
 
@@ -87,7 +140,9 @@ WHERE r.blocking_session_id <> 0;
 SQL Server：
 
 ```sql
-ALTER TABLE Users ADD Version rowversion NOT NULL;
+-- Version 是既有 Accounts schema 的唯一 rowversion 欄位。
+SELECT Id, DisplayName, Balance, Version
+FROM Accounts;
 ```
 
 EF Core：
@@ -95,8 +150,9 @@ EF Core：
 ```csharp
 public sealed class User
 {
-    public Guid Id { get; set; }
-    public string Name { get; set; } = string.Empty;
+    public int Id { get; set; }
+    public string DisplayName { get; set; } = string.Empty;
+    public decimal Balance { get; set; }
     public byte[] Version { get; set; } = [];
 }
 
@@ -109,19 +165,22 @@ modelBuilder.Entity<User>()
 
 ### Pessimistic concurrency
 
-透過較高 isolation、transaction 或特定 locking semantics 先保護資料，讓其他 request 等待。它可以避免某些 race，但增加 blocking 與 deadlock 風險；不要只為了「不想處理 conflict」就到處使用。
+鎖定式悲觀控制要在短 transaction 內使用 `REPEATABLE READ`／`SERIALIZABLE`，或對必要查詢使用 `UPDLOCK`（必要時搭配 `HOLDLOCK`／範圍索引）讓讀到的 row 在更新前保持保護。單純 `BEGIN TRANSACTION` 加預設 `READ COMMITTED` 不會保留一般 SELECT 的 shared lock；`SNAPSHOT` 則是 row-versioned optimistic control，不是悲觀鎖。這些策略會增加 blocking／deadlock 風險。
+
+```sql
+BEGIN TRANSACTION;
+SELECT Id, Balance
+FROM dbo.Accounts WITH (UPDLOCK, HOLDLOCK)
+WHERE Id = 1;
+-- 在同一 transaction 內檢查餘額並 UPDATE
+COMMIT;
+```
 
 ```csharp
-try
-{
-    await db.SaveChangesAsync(cancellationToken);
-}
-catch (DbUpdateConcurrencyException)
-{
-    // 回傳 409 Conflict、重新載入、merge 或依 domain policy 拒絕。
-    throw;
-}
+await db.SaveChangesAsync(cancellationToken);
 ```
+
+`DbUpdateConcurrencyException` 不是 deadlock 1205；它表示 rowversion 原始值不再匹配。API 應在 exception mapping 層回傳 409，或重新載入 database values 後依領域規則合併，不要把它當成可立即無條件重試的 deadlock。
 
 ## 6. 常見誤區
 
@@ -129,7 +188,7 @@ catch (DbUpdateConcurrencyException)
 - Deadlock retry 是 resilience，不是修正 lock ordering / transaction duration 的替代品。
 - `rowversion` 是 binary concurrency token，不是日期時間。
 - optimistic concurrency 不代表完全沒有 lock；它是 update conflict handling strategy。
-- 只看 application exception 不足以診斷 deadlock，應看 deadlock graph、blocked sessions、query plan 與 transaction scope。
+- 只看 application exception 不足以診斷 deadlock，應看 deadlock graph、blocked sessions、query plan 與 transaction scope；1205 的 retry 要重跑整個 transaction，`DbUpdateConcurrencyException` 則是 rowversion 衝突。
 
 ## 7. 面試回答
 
