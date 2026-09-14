@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using UserApi.Contracts;
 using UserApi.Services;
@@ -6,6 +7,7 @@ namespace UserApi.Controllers;
 
 [ApiController]
 [Route("api/users")]
+[Authorize]
 public sealed class UsersController(IUserService service)
     : ControllerBase
 {
@@ -19,6 +21,7 @@ public sealed class UsersController(IUserService service)
     }
 
     [HttpGet("active")]
+    [Authorize(Policy = "users.read")]
     public async Task<ActionResult<IReadOnlyList<UserResponse>>> GetActive(
         CancellationToken cancellationToken)
     {
