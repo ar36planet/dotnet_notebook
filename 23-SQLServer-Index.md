@@ -7,47 +7,48 @@ tags: [sql-server, mssql, index, performance]
 
 ## 學習目標
 
-- 建立 index 的資料結構 mental model。
+- 建立 index 的資料結構模型。
 - 分辨 clustered、nonclustered、composite、included、covering index。
 - 能從 query predicate 推測 leading key、seek、scan 與 key lookup 的關係。
 
 ## 1. 一句話理解
 
-Index 是一份依 key 組織的額外資料結構，讓 SQL Server 先縮小要找的範圍，再定位到資料，而不是每次從整張 table 逐列檢查；代價是額外 storage、寫入維護與 optimizer 選擇成本。
+Index 是依 key 排序的 B-tree：clustered index 就是 table 本身的排列，nonclustered index 是另外一份結構。它讓 SQL Server 先縮小範圍再定位資料；代價是儲存空間、寫入維護與 optimizer 選擇成本。
 
 ## 2. 實際 SQL
 
 ```sql
--- Primary key 通常會建立 unique index；clustered / nonclustered 需明確決定。
-ALTER TABLE Users
-ADD CONSTRAINT PK_Users PRIMARY KEY CLUSTERED (Id);
+-- PRIMARY KEY 一定建 unique index；預設 clustered，已有 clustered index 時才變 nonclustered。
+ALTER TABLE Orders
+ADD CONSTRAINT PK_Orders PRIMARY KEY CLUSTERED (OrderId);
 
--- 常見查詢：依 Name + Status 篩選，再取 CreatedAt / Email。
-CREATE INDEX IX_Users_Name_Status
-ON Users (Name, Status)
-INCLUDE (CreatedAt, Email);
+-- 常見查詢：依 CustomerId + Status 篩選，再取 OrderedAt / TotalAmount。
+CREATE INDEX IX_Orders_CustomerId_Status
+ON Orders (CustomerId, Status)
+INCLUDE (OrderedAt, TotalAmount);
 
 -- unique index 同時是 integrity constraint 的一部分。
-CREATE UNIQUE INDEX UX_Users_Email
-ON Users (Email);
+CREATE UNIQUE INDEX UX_Orders_InvoiceNo
+ON Orders (InvoiceNo);
 ```
 
 ## 3. 執行結果
 
-假設有一百萬筆 Users：
+以本節 DDL、clustered primary key 與 unique `InvoiceNo` index 為前提：
 
 ```sql
-SELECT Id, Name, Email
-FROM Users
-WHERE Email = 'ada@example.com';
+SELECT OrderId, CustomerId, InvoiceNo
+FROM Orders
+WHERE InvoiceNo = 'INV-2026-0001';
 ```
 
-- 沒有 Email index：可能需要 Table Scan，檢查大量 row。
-- 有可用的 Email index：可能從 B-tree root → branch → leaf 做 Index Seek，再取出 row。
-- 若 index leaf 已包含查詢需要的欄位：可能直接完成，形成 covering index。
-- 若 index 只找到 key / row locator，其他欄位還要回 clustered index 找：可能出現 Key Lookup。
+預期執行計畫（需在 SQL Server 以 `SET STATISTICS XML ON` 實測）：
 
-`Seek` 通常表示按條件定位一段範圍；`Scan` 表示讀取 index / table 的大量或全部部分。Scan 不一定永遠錯，例如查詢需要 80% rows 時，scan 可能比 seek + 大量 lookup 更合理。
+- 沒有 `InvoiceNo` index：因為 table 有 clustered PK，運算子是 `Clustered Index Scan`；heap 才叫 `Table Scan`。
+- 有 `UX_Orders_InvoiceNo`：先做 `Index Seek`；若還要取不在 index leaf 的欄位，會回 clustered index 做 `Key Lookup`。
+- 若 index INCLUDE 了查詢需要的欄位，Key Lookup 可消失，形成 covering index。
+
+`Seek` 表示按條件定位一段範圍；`Scan` 是把 index 或 table 從頭讀到尾。查詢需要大部分資料時，scan 可能比 seek 加大量 lookup 更合理。
 
 ## 4. SQL Server 背後大概做什麼
 
@@ -55,33 +56,35 @@ WHERE Email = 'ada@example.com';
 
 - table data rows 依 clustered key 組織；leaf level 就是資料本身。
 - 一張 table 最多一個 clustered index。
-- Primary key constraint 預設常建立 clustered index，但可以指定成 nonclustered，也可以讓沒有 PK 的 table 有 clustered index。
+- Primary key 一定建立 unique index；預設是 clustered，table 已有 clustered index 時才用 nonclustered。沒有 PK 的 table 也可以有 clustered index。
 - clustered key 會出現在 nonclustered index 的 row locator 中，因此 key 太寬會放大其他 index。
+- 每張 table 最多 1 個 clustered index、最多 999 個 nonclustered index；index key 最多 32 欄，clustered key 上限 900 bytes、nonclustered key 上限 1,700 bytes（SQL Server 2016+）。
 
 ### Nonclustered index
 
 - 是獨立的 B-tree，leaf level 保存 key、included columns 與 row locator。
+- clustered table 的 row locator 是 clustered key，回表叫 Key Lookup；heap 的 row locator 是 RID，回表叫 RID Lookup。
 - 可以有多個，但每個 INSERT / UPDATE / DELETE 都可能要維護它們。
-- `INCLUDE` 欄位不參與排序，也不計入 key size 的同一種限制；它們用來補足 projection，減少 Key Lookup。
+- `INCLUDE` 欄位不參與排序，也不計入 key 欄位／key size 限制；最多 1,023 欄，用來補足投影、減少 Key Lookup。
 
 ### Composite index 與 leading key
 
 ```sql
-CREATE INDEX IX_User_Name_Status
-ON Users(Name, Status);
+CREATE INDEX IX_Orders_CustomerId_Status
+ON Orders(CustomerId, Status);
 ```
 
-它的索引順序先按 `Name`，再按同一個 Name 下的 `Status`。因此：
+它的索引順序先按 `CustomerId`，再按同一個 CustomerId 下的 `Status`。因此：
 
 ```sql
-WHERE Name = @name;                         -- 可能有效使用 leading key
-WHERE Name = @name AND Status = @status;   -- 通常更精準
-WHERE Status = @status;                    -- 沒有 Name，未必能有效 seek
+WHERE CustomerId = @customerId;                                  -- 使用 leading key
+WHERE CustomerId = @customerId AND Status = @status;              -- 兩個 key 都可定位
+WHERE Status = @status;                                           -- 沒有 CustomerId，不能沿同一範圍 seek
 ```
 
-這個概念常被稱為 leftmost / leading key；不是說 `Status` 完全不能被 optimizer 使用，而是缺少前導欄位時通常不能沿著同樣的 B-tree 範圍直接定位。
+這個概念常稱為 leftmost／leading key；少了 `CustomerId`，optimizer 只能整個 index 掃過（Index Scan），不能沿著同一個 B-tree 範圍 seek。
 
-column order 的決策要看：常見 equality predicate、range predicate、join key、排序需求、selectivity、資料分布與 write cost，不是只把「最常出現的欄位」放第一。
+欄位順序先放出現在 equality／inequality／BETWEEN 或 join 的欄位；equality 通常排在 range 前，再依 distinct 程度由高到低排列。排序需求與寫入成本再用實際查詢和 workload 驗證。
 
 ### Covering index
 
@@ -92,20 +95,28 @@ column order 的決策要看：常見 equality predicate、range predicate、joi
 Fluent API 建立 index：
 
 ```csharp
-modelBuilder.Entity<User>()
-    .HasIndex(x => new { x.Name, x.Status })
-    .IncludeProperties(x => new { x.CreatedAt, x.Email });
+modelBuilder.Entity<Order>()
+    .Property(x => x.InvoiceNo)
+    .HasMaxLength(100);
+
+modelBuilder.Entity<Order>()
+    .HasIndex(x => new { x.CustomerId, x.Status })
+    .IncludeProperties(x => new { x.OrderedAt, x.TotalAmount })
+    .IsDescending(false, true);
 ```
 
-實際 provider / EF Core version 對 filtered index、included columns、descending index 等能力要查文件並檢查 migration：
+EF Core 的 API 對應如下：
 
 ```csharp
-modelBuilder.Entity<User>()
-    .HasIndex(x => x.Email)
+modelBuilder.Entity<Order>()
+    .HasIndex(x => x.InvoiceNo)
+    .HasFilter("[InvoiceNo] IS NOT NULL")
     .IsUnique();
 ```
 
-index 設計應從真正的 EF LINQ query 出發：`Where`、`Join`、`OrderBy`、projection 與 pagination 的組合，比單看 entity 欄位更有意義。
+`IncludeProperties(...)` 建立 included columns，`IsDescending(...)` 自 EF Core 7 起可設定降冪 key，`HasFilter(...)` 建立 filtered index。SQL Server provider 對 nullable unique index 會自動加 `IS NOT NULL` filter；若要取消才傳 `HasFilter(null)`。
+
+index 應從真正的 EF LINQ query 反推：`Where`、`Join`、`OrderBy`、projection 與 pagination 的組合，而不是從 entity 欄位列表挑選。
 
 ## 6. 常見誤區
 
@@ -114,14 +125,14 @@ index 設計應從真正的 EF LINQ query 出發：`Where`、`Join`、`OrderBy`�
 - `Index Seek` 不自動代表整個 query 很快；後面可能有大量 Key Lookup、Sort 或 join。
 - `Index Scan` 不自動代表 query 很慢；查大量資料時 scan 可能合理。
 - INCLUDE 欄位只解決 coverage，不會幫你建立 predicate 的排序與 seek 能力。
-- 短期看到 missing index suggestion 不要直接全部建立；要和 workload、寫入成本、既有 index 重複性一起評估。
+- 看到 missing index suggestion 不要直接全部建立；要和 workload、寫入成本、既有 index 重複性一起評估。
 
 ## 7. 面試回答
 
-> Index 是依 key 排序的額外結構，讓 SQL Server 可以先定位範圍，而不是掃整張 table。Clustered index 的 leaf 是資料本身，一張 table 最多一個；nonclustered index 是額外 B-tree，可用 INCLUDE 補 projection 欄位。Composite index 要注意 leading key，`(Name, Status)` 通常對 Name 開頭的 predicate 有利，不代表單獨查 Status 也同樣有效。Index 會加速 read，但會增加 storage 與 write maintenance。
+> Index 是依 key 排序的結構：clustered index 的 leaf 是資料本身，一張 table 最多一個；nonclustered index 是額外 B-tree，可用 INCLUDE 補投影欄位。Composite index 要注意 leading key，`(CustomerId, Status)` 對 CustomerId 開頭的條件有利，不代表單獨查 Status 也同樣有效。Index 會加速讀取，但會增加儲存空間與寫入維護。
 
 ## 8. 小練習
 
-1. 為 `WHERE UserId = @id ORDER BY CreatedAt DESC` 設計一個 order index。
-2. 解釋 `(Name, Status)` 為什麼不等於 `(Status, Name)`。
+1. 為 `WHERE CustomerId = @id ORDER BY OrderedAt DESC` 設計一個 order index。
+2. 解釋 `(CustomerId, Status)` 為什麼不等於 `(Status, CustomerId)`。
 3. 什麼情況下 Key Lookup 可能成為效能瓶頸？
