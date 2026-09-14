@@ -32,9 +32,9 @@ image distribution → registry
 ```
 
 - image 是 immutable layers 的集合。
-- container 是 image 的 writable layer 加上 process 和 runtime configuration。
-- container 刪掉後，寫在 writable layer 的資料通常也消失；資料庫要使用 volume。
-- 同一個 Docker network 上的 service 應使用 service name 互相連線，不要把另一個 container 的 `localhost` 當成對方。
+- container 是 image 的 writable layer 加上處理程序與執行階段設定。
+- container 刪掉後，寫在 writable layer 的資料通常也消失；需要持久化的資料不可只放在 writable layer，資料庫可使用 volume、bind mount 或外部託管服務。
+- Compose 中用 service name 互相連線；一般 user-defined Docker network 用 container name 或 network alias。不要把另一個 container 的 `localhost` 當成對方。
 
 ### .NET 10 multi-stage Dockerfile
 
@@ -73,13 +73,26 @@ ENTRYPOINT ["dotnet", "ContainerApi.dll"]
 2. 先只複製 `.csproj`，讓 dependency restore layer 可以被 Docker cache 重用。
 3. `dotnet publish` 產生 Release output。
 4. `aspnet:10.0` 只提供 ASP.NET Core runtime。
-5. `USER $APP_UID` 讓 process 不以 root 執行。
-6. `EXPOSE` 是 image metadata；host mapping 要在 `docker run -p` 或 Compose 設定。
+5. `USER $APP_UID` 讓應用程式處理程序不以 root 執行；這不等於 Docker daemon 的 rootless mode。
+6. `EXPOSE` 是 image metadata；host mapping 要在 `docker run -p` 或 Compose 設定。最後一個 build argument 是 context；本例 context 必須是 `examples/ContainerApi`。
+
+`.NET 10` 的無 OS suffix Linux tag 目前指向 Ubuntu 24.04；若 native dependency 依賴特定 distribution，應使用明確 variant。進階可評估 `aspnet:10.0-noble-chiseled`：它預設 non-root、沒有 shell／package manager，攻擊面較小，但 globalization 與除錯工具也受限。
+
+.NET 8+ SDK 也能不使用 Dockerfile 產生 OCI image：
+
+```bash
+dotnet publish examples/ContainerApi/ContainerApi.csproj \
+  --os linux --arch x64 /t:PublishContainer
+```
+
+需要完全控制 build stage／OS 套件時使用 Dockerfile；標準 .NET workload 可考慮 SDK container publishing。
 
 ### Build、run、log、stop
 
 ```bash
-docker build --tag container-api:10.0 .
+docker build --file examples/ContainerApi/Dockerfile \
+  --tag container-api:10.0 \
+  examples/ContainerApi
 docker image ls container-api
 
 docker run --rm \
@@ -92,7 +105,7 @@ docker run --rm \
 `8080:8080` 是 `host port:container port`。另一個 terminal 可以檢查：
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8080/health/live
 docker ps
 docker logs container-api
 docker stop container-api
@@ -112,7 +125,7 @@ docker run --rm \
   container-api:10.0
 ```
 
-`__` 會對應到 configuration section 的 `:`。不要把 password、token 或 private certificate 寫進 Dockerfile、source control、build layer 或 application log。
+`__` 會對應到 configuration section 的 `:`。一般設定可用 environment variable；production 的 password、token、private key 優先由平台 secret manager 以受控檔案／provider 注入。環境變數通常是未加密明文，不要把秘密直接寫在命令列（可能進 shell history）、Dockerfile、source control、build layer 或 application log。
 
 ### Volume 和 health check
 
@@ -123,16 +136,23 @@ docker run --rm \
   container-api:10.0
 ```
 
-application 可以提供 health endpoint：
+application 可以提供分開的 liveness／readiness endpoint：
 
 ```csharp
 builder.Services.AddHealthChecks();
 
 var app = builder.Build();
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = _ => false
+});
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
 ```
 
-health endpoint 不要只測 process 還活著；若它宣稱 ready，應依需求檢查必要的 database / dependency，但不要讓短暫的外部服務中斷造成整個 deployment 無限重啟。
+`/health/live` 只表示 process 還能回應；`/health/ready` 才檢查必要 dependency。ASP.NET Core endpoint、Docker `HEALTHCHECK`、Compose／Kubernetes probe 是三層不同設定；Docker 不會因 endpoint 存在就自動標成 healthy，也不會僅因 `unhealthy` 自動依 restart policy 重啟。短暫 dependency failure 應影響 readiness，不應直接讓 liveness 失敗。
 
 ## 3. 實務範例：把 ASP.NET Core 放進 container
 
@@ -150,16 +170,17 @@ examples/ContainerApi/
 
 ```bash
 dotnet run --project examples/ContainerApi/ContainerApi.csproj --urls http://localhost:5080
-curl http://localhost:5080/health
+curl http://localhost:5080/health/live
 ```
 
 再建立 image：
 
 ```bash
-cd examples/ContainerApi
-docker build -t container-api:10.0 .
+docker build -f examples/ContainerApi/Dockerfile \
+  -t container-api:10.0 \
+  examples/ContainerApi
 docker run --rm -p 8080:8080 container-api:10.0
-curl http://localhost:8080/health
+curl http://localhost:8080/health/live
 ```
 
 Docker 內的 application listening port、host port 和 browser URL 要分開思考：container 內只需要聽 `8080`，host 可以選 `8080`、`18080` 或其他尚未使用的 port。
@@ -169,9 +190,9 @@ Docker 內的 application listening port、host port 和 browser URL 要分開�
 - `EXPOSE 8080` 不等於 host 已經可以用 `localhost:8080` 連線；還需要 `-p 8080:8080`。
 - container 內的 `localhost` 指向目前 container，不是 host，也不是 Compose 裡的另一個 service。
 - image 不是 VM；container 通常共用 host kernel，不會替每個 container 開一台完整 guest OS。
-- multi-stage build 讓 final image 根本不包含 SDK、原始碼和 restore cache。
+- 這份 Dockerfile 的 final stage 只 `COPY --from=build /app/publish .`，所以不會把 build stage 的 SDK、`/src` 和 NuGet cache 複製進 final image；multi-stage 本身不會自動提供這個保證。
 - `docker stop` 不等於刪掉 volume；資料是否持久化取決於 volume mapping 和服務本身的寫入位置。
-- `latest` 不是可重現版本。教材和 production deployment 應使用明確 tag。
+- `latest` 與 Git SHA tag 都是可被 registry 改指向的 mutable reference；它們方便辨識與 rollback，但需要 bit-for-bit 固定時要 pin image digest。pin digest 也會失去自動安全更新，需搭配更新流程。
 - `USER $APP_UID` 可能讓原本依賴 root 寫入 `/app` 的程式失敗；要把可寫資料放到正確 volume。
 - Docker image 裡的 secret 即使之後刪掉 Dockerfile 行，也可能留在舊 layer；secret 外洩時要撤銷並重建 image。
 
@@ -184,5 +205,5 @@ Docker 內的 application listening port、host port 和 browser URL 要分開�
 1. 把 `examples/ContainerApi` 的 host port 從 `8080` 改成 `18080`，container port 保持 `8080`。
 2. 解釋為什麼 `COPY *.csproj` 和 `dotnet restore` 可以形成獨立 cache layer。
 3. 找出一個不能以 root 執行的檔案寫入需求，設計 volume 和 directory permission。
-4. 為 container 加入 `/health` check，區分 process alive 和 application ready。
+4. 為 container 加入 `/health/live` 與 `/health/ready`，區分 process alive 和 application ready。
 5. 將 image tag 從 `latest` 改成 `10.0.0-<git-sha>`，說明這對 rollback 的幫助。
