@@ -21,10 +21,7 @@ public sealed class EfProductRepository(ProductDbContext db)
             product => product.Id == id,
             cancellationToken);
 
-    public Task AddAsync(
-        Product product,
-        CancellationToken cancellationToken)
-        => db.Products.AddAsync(product, cancellationToken).AsTask();
+    public void Add(Product product) => db.Products.Add(product);
 
     public void Remove(Product product) => db.Products.Remove(product);
 

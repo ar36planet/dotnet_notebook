@@ -27,7 +27,7 @@ else
         {
             <tr>
                 <td>@product.Name</td>
-                <td>@product.Price.ToString("C2")</td>
+                <td>NT$@product.Price.ToString("N0", System.Globalization.CultureInfo.GetCultureInfo("zh-TW"))</td>
                 <td>
                     <a asp-action="Details" asp-route-id="@product.Id">詳細</a> |
                     <a asp-action="Edit" asp-route-id="@product.Id">編輯</a> |

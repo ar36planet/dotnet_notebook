@@ -11,9 +11,7 @@ public interface IProductRepository
         int id,
         CancellationToken cancellationToken);
 
-    Task AddAsync(
-        Product product,
-        CancellationToken cancellationToken);
+    void Add(Product product);
 
     void Remove(Product product);
 

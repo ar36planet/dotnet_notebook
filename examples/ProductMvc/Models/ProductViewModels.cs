@@ -15,6 +15,7 @@ public sealed class ProductCreateViewModel
     [StringLength(120, ErrorMessage = "商品名稱不能超過 120 個字。")]
     public string Name { get; set; } = string.Empty;
 
+    [Required(ErrorMessage = "請輸入價格。")]
     [Range(0.01, 100000, ErrorMessage = "價格必須介於 0.01 到 100,000。")]
     public decimal Price { get; set; }
 }
@@ -27,6 +28,7 @@ public sealed class ProductEditViewModel
     [StringLength(120, ErrorMessage = "商品名稱不能超過 120 個字。")]
     public string Name { get; set; } = string.Empty;
 
+    [Required(ErrorMessage = "請輸入價格。")]
     [Range(0.01, 100000, ErrorMessage = "價格必須介於 0.01 到 100,000。")]
     public decimal Price { get; set; }
 }

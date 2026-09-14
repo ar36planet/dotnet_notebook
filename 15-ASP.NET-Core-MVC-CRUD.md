@@ -7,7 +7,7 @@ tags: [aspnet-core, mvc, razor, ef-core, crud, capstone]
 
 ## 學習目標
 
-- 從零讀懂一個現代 ASP.NET Core MVC CRUD 專案。
+- 從零讀懂一個 ASP.NET Core MVC CRUD 專案。
 - 看懂 Entity、ViewModel、Repository、Service、Controller 的資料流。
 - 寫出 List、Details、Create、Edit、Delete 五組 MVC actions 和 Razor Views。
 - 實際使用 EF Core、model binding、`ModelState`、Anti-Forgery、TempData 和 PRG。
@@ -82,13 +82,16 @@ MVC 的 ViewModel 不等於 EF Core Entity。表單只應暴露它可以修改�
 
 ```text
 examples/ProductMvc/
+├── Program.cs
 ├── Controllers/
+│   ├── HomeController.cs
 │   └── ProductController.cs
 ├── Data/
 │   └── ProductDbContext.cs
 ├── Domain/
 │   └── Product.cs
 ├── Models/
+│   ├── ErrorViewModel.cs
 │   └── ProductViewModels.cs
 ├── Repositories/
 │   ├── IProductRepository.cs
@@ -98,6 +101,9 @@ examples/ProductMvc/
 │   ├── ProductCommands.cs
 │   └── ProductService.cs
 └── Views/
+    ├── Home/
+    │   ├── Index.cshtml
+    │   └── Privacy.cshtml
     ├── Product/
     │   ├── Index.cshtml
     │   ├── Details.cshtml
@@ -106,12 +112,14 @@ examples/ProductMvc/
     │   └── Delete.cshtml
     └── Shared/
         ├── _Layout.cshtml
+        ├── Error.cshtml
         └── _ValidationScriptsPartial.cshtml
 ```
 
 ### `Program.cs`
 
 ```csharp
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using ProductMvc.Data;
 using ProductMvc.Repositories;
@@ -119,7 +127,8 @@ using ProductMvc.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllersWithViews();
+builder.Services.AddControllersWithViews(options =>
+    options.Filters.Add(new AutoValidateAntiforgeryTokenAttribute()));
 builder.Services.AddDbContext<ProductDbContext>(options =>
     options.UseSqlite(
         builder.Configuration.GetConnectionString("Products")
@@ -147,11 +156,11 @@ app.MapControllerRoute(
 await app.Services.InitializeDatabaseAsync();
 
 app.Run();
-
-public partial class Program { }
 ```
 
 `AddControllersWithViews()` 是 MVC View 專案的註冊；`MapControllerRoute()` 是讓 `/Product`、`/Product/Edit/1` 這類 conventional route 可被找到。`DbContext` 使用 scoped lifetime，和 HTTP request scope 對齊。
+
+.NET 9 起 MVC 範本可改用 `MapStaticAssets()` 與 `.WithStaticAssets()`；本 sample 保留 `UseStaticFiles()`，兩者都能提供靜態檔案，但範本 API 與快取／指紋行為不同。
 
 如果部署環境使用 SQL Server，provider 和 connection string 改成：
 
@@ -252,6 +261,7 @@ public sealed class ProductCreateViewModel
     [StringLength(120, ErrorMessage = "商品名稱不能超過 120 個字。")]
     public string Name { get; set; } = string.Empty;
 
+    [Required(ErrorMessage = "請輸入價格。")]
     [Range(0.01, 100000, ErrorMessage = "價格必須介於 0.01 到 100,000。")]
     public decimal Price { get; set; }
 }
@@ -264,6 +274,7 @@ public sealed class ProductEditViewModel
     [StringLength(120, ErrorMessage = "商品名稱不能超過 120 個字。")]
     public string Name { get; set; } = string.Empty;
 
+    [Required(ErrorMessage = "請輸入價格。")]
     [Range(0.01, 100000, ErrorMessage = "價格必須介於 0.01 到 100,000。")]
     public decimal Price { get; set; }
 }
@@ -283,7 +294,7 @@ public interface IProductRepository
         int id,
         CancellationToken cancellationToken);
 
-    Task AddAsync(Product product, CancellationToken cancellationToken);
+    void Add(Product product);
     void Remove(Product product);
     Task SaveChangesAsync(CancellationToken cancellationToken);
 }
@@ -307,10 +318,7 @@ public sealed class EfProductRepository(ProductDbContext db)
             product => product.Id == id,
             cancellationToken);
 
-    public Task AddAsync(
-        Product product,
-        CancellationToken cancellationToken)
-        => db.Products.AddAsync(product, cancellationToken).AsTask();
+    public void Add(Product product) => db.Products.Add(product);
 
     public void Remove(Product product) => db.Products.Remove(product);
 
@@ -319,7 +327,7 @@ public sealed class EfProductRepository(ProductDbContext db)
 }
 ```
 
-列表使用 `AsNoTracking()`，因為這條 query 只讀取；Edit 和 Delete 需要先取得 tracking entity，修改或刪除後由 `SaveChangesAsync` 寫回資料庫。
+列表使用 `AsNoTracking()`，因為這條 query 只讀取；這個範例的 Edit 和 Delete 先取得 tracking entity，方便回 404 並只修改允許的欄位，再由 `SaveChangesAsync` 寫回資料庫。EF Core 也能用 `Update`／`Remove` attach detached entity，或用 EF Core 7+ 的 `ExecuteUpdateAsync`／`ExecuteDeleteAsync` 做 set-based operation。
 
 ### Service 與 mapping
 
@@ -375,7 +383,7 @@ public sealed class ProductService(
             CreatedAt = DateTimeOffset.UtcNow
         };
 
-        await repository.AddAsync(product, cancellationToken);
+        repository.Add(product);
         await repository.SaveChangesAsync(cancellationToken);
         return product.Id;
     }
@@ -426,6 +434,8 @@ public sealed class ProductService(
 ```
 
 Service 不接受瀏覽器的 `Product` entity，而是接受 command。Controller 負責把 MVC ViewModel 轉成 command；Service 負責 entity 建立、修改、刪除和 mapping。
+
+目前 Edit 是 last-write-wins：兩個使用者讀到同一筆商品時，後送出的修改會覆蓋先送出的修改。要防止這件事，加入 concurrency token，並在 `SaveChangesAsync` 捕捉 `DbUpdateConcurrencyException`；SQLite 沒有 SQL Server `rowversion`，要改用應用程式管理的 `Version` 欄位，每次成功更新時遞增。
 
 ### Controller 全部 CRUD actions
 
@@ -536,7 +546,7 @@ public sealed class ProductController(IProductService service)
 }
 ```
 
-`[ActionName("Delete")]` 讓確認表單 POST 到 `/Product/Delete/1`，但 C# method 名稱仍可叫 `DeleteConfirmed`，避免和 GET action 造成 method overload 閱讀混亂。
+GET 與 POST 的 `Delete` 參數簽章相同，C# 不允許同名同簽章的 overload，所以 POST 版本改名 `DeleteConfirmed`；`[ActionName("Delete")]` 讓 `/Product/Delete/1` 的 POST 仍對到這個 method。
 
 ## 4. 實務範例：完整 Razor Views
 
@@ -650,7 +660,7 @@ else
         {
             <tr>
                 <td>@product.Name</td>
-                <td>@product.Price.ToString("C2")</td>
+                <td>NT$@product.Price.ToString("N0", System.Globalization.CultureInfo.GetCultureInfo("zh-TW"))</td>
                 <td>
                     <a asp-action="Details" asp-route-id="@product.Id">詳細</a> |
                     <a asp-action="Edit" asp-route-id="@product.Id">編輯</a> |
@@ -676,7 +686,7 @@ else
     <dt class="col-sm-2">名稱</dt>
     <dd class="col-sm-10">@Model.Name</dd>
     <dt class="col-sm-2">價格</dt>
-    <dd class="col-sm-10">@Model.Price.ToString("C2")</dd>
+    <dd class="col-sm-10">NT$@Model.Price.ToString("N0", System.Globalization.CultureInfo.GetCultureInfo("zh-TW"))</dd>
 </dl>
 <a asp-action="Edit" asp-route-id="@Model.Id">編輯</a> |
 <a asp-action="Index">回到清單</a>
@@ -768,17 +778,19 @@ else
 </form>
 ```
 
-這個 POST form 會產生 Anti-Forgery hidden input；對應 action 有 `[ValidateAntiForgeryToken]`，因此 GET 確認頁和 POST mutation 分開。
+這個 POST form 會產生 `__RequestVerificationToken` hidden input，對應 action 加 `[ValidateAntiForgeryToken]` 驗證。刪除只在 POST 執行，GET 只顯示確認頁，因為 GET 不應改變資料狀態。
 
 ## 5. 常見誤解
 
 - `ProductViewModel` 不是 EF Core entity。它沒有 `DbContext` tracking，也不應直接被 repository 儲存。
-- `AsNoTracking()` 適合 read-only list；Edit / Delete 需要 tracking entity 才能修改或標記刪除。
+- `AsNoTracking()` 適合 read-only list；這個範例的 Edit / Delete 先查 tracking entity，是為了回 404 並只更新允許欄位；EF Core 也支援 `Update`、`ExecuteUpdateAsync` 和 `ExecuteDeleteAsync`。
 - `ModelState.IsValid` 通過只代表 binding 和 annotation validation 通過；商品是否重複、是否可下架等 domain rule 仍需 service 檢查。
+- `Add` 只把 entity 放進 change tracker；真正的資料庫 I/O 在 `SaveChangesAsync`。只有 HiLo 等 value generator 情境才需要 `AddAsync`。
 - `return View(model)` 會保留錯誤欄位和使用者輸入；`RedirectToAction` 適合成功後，不適合 validation error。
-- `EnsureCreatedAsync()` 適合本機 sample 的第一次建立，不是 production migration。
 - `TempData` 適合「商品已建立」這種小訊息，不適合傳整個查詢結果。
-- Delete 的 GET action 不應執行刪除；GET 應該是 safe read，POST 才做 mutation。
+- Edit／Delete 遇到併發更新或刪除時，`SaveChangesAsync` 可能丟 `DbUpdateConcurrencyException`；沒有 concurrency token 的目前 sample 是 last-write-wins。
+- Delete 的 GET action 只顯示確認頁；真正刪除使用 POST，因為 GET 不應改變資料狀態。
+- `ProductCreateViewModel.Price` 是非 nullable value type，會隱含 `[Required]`；若要自訂清空欄位的訊息，明確加入 `[Required(ErrorMessage = "請輸入價格。")]`。
 - SQLite 的 SQL log 不能直接當成 SQL Server SQL；要換 provider 才能驗證 SQL Server 的 type、index 和 execution plan。
 
 ## 6. 面試怎麼回答
@@ -789,6 +801,6 @@ else
 
 1. 把 Product sample 的 `UseSqlite` 改成 `UseSqlServer`，列出需要的 package 和 connection string。
 2. 讓清單支援 `?keyword=keyboard`，並決定 keyword 要放 query string 還是 form。
-3. 加入 `ProductEditViewModel` 的 optimistic concurrency 欄位，說明需要修改哪些 entity、view 和 service。
+3. 加入 `ProductEditViewModel` 的 optimistic concurrency 欄位，說明需要修改哪些 entity、view 和 service。SQLite 沒有自動更新的 `rowversion`；可用 `Version` 整數欄位，以 `IsConcurrencyToken()` 設定並在更新時遞增。
 4. 讓 `Create` 在商品名稱已存在時加入 `ModelState.AddModelError`，並重新 render `Create.cshtml`。
 5. 寫一個同時提供 `GET /Product` HTML 和 `GET /api/products` JSON 的專案，列出哪些類別可以共用、哪些 response model 不該共用。

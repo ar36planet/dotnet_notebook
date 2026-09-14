@@ -1,11 +1,13 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Mvc;
 using ProductMvc.Data;
 using ProductMvc.Repositories;
 using ProductMvc.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllersWithViews();
+builder.Services.AddControllersWithViews(options =>
+    options.Filters.Add(new AutoValidateAntiforgeryTokenAttribute()));
 builder.Services.AddDbContext<ProductDbContext>(options =>
     options.UseSqlite(
         builder.Configuration.GetConnectionString("Products")
@@ -34,5 +36,3 @@ await app.Services.InitializeDatabaseAsync();
 
 
 app.Run();
-
-public partial class Program { }

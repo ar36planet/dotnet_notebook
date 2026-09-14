@@ -36,7 +36,7 @@ public sealed class ProductService(
             CreatedAt = DateTimeOffset.UtcNow
         };
 
-        await repository.AddAsync(product, cancellationToken);
+        repository.Add(product);
         await repository.SaveChangesAsync(cancellationToken);
         return product.Id;
     }
