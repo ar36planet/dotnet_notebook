@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: products-api-migration
+  namespace: dotnet-notebook
+  labels:
+    app.kubernetes.io/name: products-api-migration
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: products-api-migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: products-api-migrator
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: registry-credentials
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migration
+          # This is a reviewed migration-bundle image, not the web image.
+          image: registry.example.com/dotnet-notebook/orders-migrations:2026.09.15@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["/migrations/run-reviewed-bundle"]
+          envFrom:
+            - configMapRef:
+                name: products-api-config
+          env:
+            - name: ConnectionStrings__Orders
+              valueFrom:
+                secretKeyRef:
+                  name: products-api-secret
+                  key: orders-connection-string
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

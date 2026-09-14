@@ -1,0 +1,172 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: products-api
+  namespace: dotnet-notebook
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: products-api-migrator
+  namespace: dotnet-notebook
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: products-api-config
+  namespace: dotnet-notebook
+data:
+  ASPNETCORE_HTTP_PORTS: "8080"
+  DOTNET_ENVIRONMENT: Production
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: products-api
+  namespace: dotnet-notebook
+  labels:
+    app.kubernetes.io/name: products-api
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: products-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: products-api
+    spec:
+      serviceAccountName: products-api
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      imagePullSecrets:
+        - name: registry-credentials
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: products-api
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: products-api
+          # Replace the example digest with the digest from the private registry.
+          image: registry.example.com/dotnet-notebook/container-api:10.0.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: products-api-config
+          env:
+            - name: ConnectionStrings__Orders
+              valueFrom:
+                secretKeyRef:
+                  name: products-api-secret
+                  key: orders-connection-string
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          # These values are structure examples, not capacity claims.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: products-api
+  namespace: dotnet-notebook
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: products-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: products-api
+  namespace: dotnet-notebook
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: products-api
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: products-api
+  namespace: dotnet-notebook
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - products.example.com
+      secretName: products-api-tls
+  rules:
+    - host: products.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: products-api
+                port:
+                  name: http
