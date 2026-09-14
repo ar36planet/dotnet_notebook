@@ -28,7 +28,7 @@ var query = db.Users
 var result = await query.ToListAsync(cancellationToken);
 ```
 
-大致可能翻成：
+以下為 EF Core 10 + SQL Server provider、`User` model 與 `IsActive` mapping 固定時的 `ToQueryString()` 輸出（只供除錯，不代表已送出資料庫）：
 
 ```sql
 SELECT [u].[Id], [u].[Name]
@@ -37,7 +37,7 @@ WHERE [u].[IsActive] = CAST(1 AS bit)
 ORDER BY [u].[Name];
 ```
 
-實際 SQL 會依 provider、model naming、parameter、版本與 query shape 變化；用 logging 或 `ToQueryString()` 驗證，不要把上面當固定輸出。
+`ToQueryString()` 不會執行 query；真正送出的 command 與耗時要用 EF Core logging／`CommandExecuted` 驗證。SQL 會隨 provider、mapping 與 query shape 改變。
 
 ## 3. 執行結果
 
@@ -53,8 +53,12 @@ ORDER BY [u].[Name];
 ### 常見 query method
 
 ```csharp
-var first = await db.Users.FirstAsync(cancellationToken);
-var maybeFirst = await db.Users.FirstOrDefaultAsync(cancellationToken);
+    var first = await db.Users
+        .OrderBy(user => user.Id)
+        .FirstAsync(cancellationToken);
+    var maybeFirst = await db.Users
+        .OrderBy(user => user.Id)
+        .FirstOrDefaultAsync(cancellationToken);
 
 var one = await db.Users.SingleAsync(
     x => x.Email == email, cancellationToken);
@@ -68,12 +72,24 @@ var count = await db.Users.CountAsync(
 var list = await db.Users.ToListAsync(cancellationToken);
 ```
 
-- `FirstAsync`：沒有 row 就 exception；只要求至少一筆。
-- `FirstOrDefaultAsync`：沒有 row 回 default / null；多筆只取第一筆。
+- `FirstAsync`：沒有 row 就 exception；有 `OrderBy` 時回排序後第一筆。
+- `FirstOrDefaultAsync`：沒有 row 回 default / null；有 `OrderBy` 時回排序後第一筆。
 - `SingleAsync`：要求剛好一筆；0 或多筆都 exception。
 - `SingleOrDefaultAsync`：允許 0 筆，但多筆 exception；適合 database unique invariant。
 - `AnyAsync`：通常表達 existence，不要用 `CountAsync() > 0` 取代它。
 - `CountAsync`：要求 count，可能需要計算多筆；只問是否存在用 `AnyAsync`。
+
+### 關聯資料與寫入路徑
+
+```csharp
+var orders = await db.Users
+    .Include(user => user.Orders)
+    .ThenInclude(order => order.Lines)
+    .AsSplitQuery()
+    .ToListAsync(cancellationToken);
+```
+
+同層載入多個 collection 時，single query 可能產生 cartesian explosion；`AsSplitQuery()` 會拆成多句 SQL，但仍要穩定排序，EF Core 10 以前搭配 `Skip`／`Take` 尤其要使用完整唯一 ordering。filtered `Include` 在 tracking query 可能被 navigation fix-up 補回之前已追蹤的資料，需使用新 context 或 no-tracking query。
 
 ## 4. SQL Server 背後大概做什麼
 
@@ -105,6 +121,23 @@ await db.SaveChangesAsync(cancellationToken);
 
 `Add` / `Update` / `Remove` 多半先改變 change tracker state；真正 command 通常在 `SaveChangesAsync` 執行。`Update` 不是「只更新你改的 property」的通用保證；對 detached graph 可能標記大量欄位，部分更新可用先 query tracked entity 再設欄位，或明確 attach / mark property modified。
 
+EF Core 7+ relational provider 另有不經 change tracker、呼叫即執行的 set-based API：
+
+```csharp
+var affected = await db.Users
+    .Where(user => !user.IsActive)
+    .ExecuteUpdateAsync(setters => setters
+        .SetProperty(user => user.IsActive, true), cancellationToken);
+
+var deleted = await db.Users
+    .Where(user => user.Id == userId)
+    .ExecuteDeleteAsync(cancellationToken);
+```
+
+`ExecuteUpdateAsync`／`ExecuteDeleteAsync` 回傳 affected rows，不會自動套用 tracked entity 的 concurrency token；多次呼叫要用明確 transaction。
+
+Raw SQL 的版本邊界：`FromSql`／`FromSqlInterpolated` 會參數化插值值（`FromSql` 自 EF Core 7），`FromSqlRaw` 若串接使用者輸入可能 SQL injection；`Database.SqlQuery<T>` 支援 scalar／未映射型別（EF Core 8+）。`FromSql` 只能直接接 `DbSet`，stored procedure／CTE non-composable SQL 後不能再接 LINQ。
+
 ## 5. 與 C# / ASP.NET Core 的關聯
 
 典型讀取 service：
@@ -114,7 +147,6 @@ public async Task<IReadOnlyList<UserResponse>> GetActiveAsync(
     CancellationToken cancellationToken)
 {
     return await db.Users
-        .AsNoTracking()
         .Where(x => x.IsActive)
         .OrderBy(x => x.Name)
         .Select(x => new UserResponse(
@@ -137,6 +169,8 @@ IReadOnlyList<UserResponse>
 ```
 
 `DbContext` 通常註冊 scoped，與一次 HTTP request / unit of work 對齊；不要把同一個 context 當成 thread-safe singleton 使用。
+
+EF Core 會盡量把可翻譯運算放在資料庫；只有最後一層 projection 可部分在用戶端計算。`Where`、`OrderBy` 等位置若無法翻譯，查詢執行時會丟 `InvalidOperationException`；要明確切到用戶端才呼叫 `AsEnumerable()`／`ToListAsync()`。EF Core 3.0 前曾允許更廣泛的 client evaluation。
 
 ## 6. 常見誤區
 
