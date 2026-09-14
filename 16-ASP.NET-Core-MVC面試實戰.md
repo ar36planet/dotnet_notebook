@@ -36,7 +36,7 @@ public async Task<IActionResult> Create(
         return View(model);
     }
 
-    await _service.CreateAsync(model, cancellationToken);
+    await service.CreateAsync(model, cancellationToken);
     return RedirectToAction(nameof(Index));
 }
 ```
@@ -81,7 +81,7 @@ public sealed class ProductController(IProductService service)
 
 **詳細解釋**
 
-`[ApiController]` 常和 `ControllerBase` 一起使用，會帶來 API 導向的 binding 和 validation 行為。瀏覽器表單需要 validation 失敗時重新 render `.cshtml`，通常使用 `Controller`，自己檢查 `ModelState`。
+`[ApiController]` 常和 `ControllerBase` 一起使用，會帶來 API 導向的 binding 和 validation 行為，並強制 controller 使用 attribute routing。瀏覽器表單需要 validation 失敗時重新 render `.cshtml`，通常使用 `Controller`，自己檢查 `ModelState`。
 
 **常見追問**
 
@@ -121,13 +121,13 @@ GET /Product       → HTML
 GET /api/products  → JSON
 ```
 
-MVC 常見 cookie / session / TempData；API 常見 bearer token 和明確的 status code / JSON error contract。這不是絕對規則，而是 client 形狀不同造成的預設設計。
+MVC 頁面多半靠 cookie、session、TempData；API 多半靠 bearer token，錯誤用 status code 加 JSON 回應。這是由 client 種類造成的常見設計。
 
 **常見追問**
 
 追問：MVC 和 API 能在同一個專案嗎？
 
-回答：可以。使用 `AddControllersWithViews()`、`MapControllerRoute()` 提供 MVC，再用 `MapControllers()` 或 API route 提供 attribute-routed API。
+回答：可以。`MapControllerRoute()` 同時涵蓋 conventional 與 attribute routing；`MapControllers()` 是純 attribute-routed API 專案的選擇，同一個 MVC app 不必兩個都寫。
 
 **程式碼範例**
 
@@ -135,7 +135,7 @@ MVC 常見 cookie / session / TempData；API 常見 bearer token 和明確的 st
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}");
-app.MapControllers();
+// MapControllerRoute 也會涵蓋 attribute-routed controller。
 ```
 
 ### 4. Razor View 是什麼？
@@ -146,7 +146,7 @@ app.MapControllers();
 
 **詳細解釋**
 
-`return View(model)` 不會回傳 `.cshtml` 原始檔；MVC 會做 view discovery，先找 `Views/[Controller]/[Action].cshtml`，再由 Razor render。預設輸出會做 HTML encoding，避免把一般文字誤當成 HTML。
+`return View(model)` 不會回傳 `.cshtml` 原始檔；MVC 會做 view discovery，先找 `Views/[Controller]/[Action].cshtml`，找不到再找 `Views/Shared/[Action].cshtml`，再由 Razor render。預設輸出會做 HTML encoding，避免把一般文字誤當成 HTML。
 
 **常見追問**
 
@@ -160,7 +160,7 @@ app.MapControllers();
 @model ProductViewModel
 
 <h1>@Model.Name</h1>
-<p>@Model.Price.ToString("C2")</p>
+<p>NT$@Model.Price.ToString("N0", System.Globalization.CultureInfo.GetCultureInfo("zh-TW"))</p>
 ```
 
 ### 5. ViewModel 為什麼不直接使用 Entity？
@@ -196,11 +196,11 @@ public sealed class ProductCreateViewModel
 
 **30 秒面試回答**
 
-> Model binding 會從 route data、query string、form fields、request body 或 uploaded files 取得值，轉成 action 參數或 ViewModel。`/Product/Edit/10` 的 `10` 可以 binding 成 `int id`；form 的 `Name` 和 `Price` 可以 binding 成 `ProductCreateViewModel`。轉換或 validation 的錯誤會放進 `ModelState`。
+> Model binding 預設依序從 form fields、request body（`[ApiController]`）、route data、query string、uploaded files 取得值，再轉成 action 參數或 ViewModel；這也是同名資料的優先順序。`/Product/Edit/10` 的 `10` 可以 binding 成 `int id`；form 的 `Name` 和 `Price` 可以 binding 成 `ProductCreateViewModel`。轉換或 validation 的錯誤會放進 `ModelState`。
 
 **詳細解釋**
 
-需要明確來源時使用 `[FromRoute]`、`[FromQuery]`、`[FromForm]`、`[FromBody]`。MVC 表單通常從 form binding；API JSON body 使用 input formatter。`[FromBody]` 不要在同一 action 放兩個，因為 body 通常只能讀一次。
+需要明確來源時使用 `[FromRoute]`、`[FromQuery]`、`[FromForm]`、`[FromBody]`。預設來源順序是 form > body > route > query；route 與 query 主要用於 simple type。MVC 表單通常從 form binding；API JSON body 使用 input formatter。`[FromBody]` 不要在同一 action 放兩個，因為 body 通常只能讀一次。
 
 **常見追問**
 
@@ -281,6 +281,7 @@ if (!ModelState.IsValid)
     return View(model);
 }
 
+var command = new CreateProductCommand(model.Name, model.Price);
 await service.CreateAsync(command, cancellationToken);
 return RedirectToAction(nameof(Index));
 ```
@@ -289,7 +290,7 @@ return RedirectToAction(nameof(Index));
 
 **30 秒面試回答**
 
-> `Model` 是 view 的主要強型別資料；`ViewData` 是目前 request 的 dictionary；`ViewBag` 是動態存取 `ViewData` 的 wrapper；`TempData` 用來把小資料帶過下一個 request，常用在 POST redirect 後顯示成功訊息。ViewData 和 ViewBag 不會自然跨 redirect，TempData 會。
+> `Model` 是 view 的主要強型別資料；`ViewData` 是目前 request 的 dictionary；`ViewBag` 是動態存取 `ViewData` 的 wrapper；`TempData` 用來把小資料帶過下一個 request，讀取後在該 request 結束時刪除，`Peek` 讀不刪、`Keep` 保留。ViewData 和 ViewBag 不會自然跨 redirect，TempData 會。
 
 **詳細解釋**
 
@@ -305,7 +306,13 @@ TempData["Message"] = "商品已建立。";
 
 追問：TempData 可以存 Entity 嗎？
 
-回答：不適合。它是跨 request 的暫存機制，預設 provider 常用 cookie，應只放短小訊息或識別值；大物件和敏感資料應放 service / database / distributed cache。
+回答：不能直接放自訂 Entity。預設 serializer 只支援基本型別、enum、`DateTime`、`Guid` 和部分集合；放 `Product` 會在 request 結束保存 TempData 時丟：
+
+```text
+System.InvalidOperationException: The 'Microsoft.AspNetCore.Mvc.ViewFeatures.Infrastructure.DefaultTempDataSerializer' cannot serialize an object of type 'Product'.
+```
+
+cookie provider 另有約 4 KB 上限，所以只放短小訊息或識別值；大物件放 service、database 或 distributed cache。
 
 **程式碼範例**
 
@@ -465,6 +472,7 @@ if (!ModelState.IsValid)
     return View(model);
 }
 
+var command = new CreateProductCommand(model.Name, model.Price);
 await service.CreateAsync(command, cancellationToken);
 TempData["Message"] = "商品已建立。";
 return RedirectToAction(nameof(Index));
@@ -579,7 +587,7 @@ public async Task<IReadOnlyList<Product>> ListAsync(
 
 **30 秒面試回答**
 
-> 可以。`AddControllersWithViews` 提供 Razor MVC，`MapControllerRoute` 提供 conventional page routes；API controller 可以使用 `ControllerBase`、`[ApiController]` 和 `MapControllers`。兩者可以共用 DI、service、repository 和 EF Core，但應維持 HTML ViewModel 與 JSON DTO 的 response boundary。
+> 可以。`AddControllersWithViews` 提供 Razor MVC，`MapControllerRoute` 同時涵蓋 conventional 與 attribute routing；API controller 使用 `ControllerBase`、`[ApiController]` 和 attribute route。純 API 專案才需要 `MapControllers`。兩者可以共用 DI、service、repository 和 EF Core，但應維持 HTML ViewModel 與 JSON DTO 的回應邊界。
 
 **詳細解釋**
 
@@ -590,7 +598,7 @@ public async Task<IReadOnlyList<Product>> ListAsync(
 /api/products        → ProductsApiController → JSON
 ```
 
-middleware、authentication、authorization 可以共用，但表單 Anti-Forgery 和 API token / CORS 要依 endpoint 的 client 形狀設定。
+middleware、authentication、authorization 可以共用，但表單 Anti-Forgery 和 API token／CORS 要依 endpoint 面對的 client 類型設定。
 
 **常見追問**
 
@@ -606,14 +614,14 @@ builder.Services.AddControllersWithViews();
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}");
-app.MapControllers();
+// MapControllerRoute 也涵蓋 attribute-routed controller。
 ```
 
 ### 19. Razor Pages 和 MVC 有什麼差異？
 
 **30 秒面試回答**
 
-> MVC 以 Controller action 為 request entry point，view 通常依 controller / action 放在 `Views`；Razor Pages 以 `.cshtml` page 為中心，PageModel 放在同一個 page 的 code-behind，使用 `OnGet`、`OnPost` handler。兩者都使用 Razor、DI、model binding、validation、filters 和 middleware。既有 controller / view 大型專案常維持 MVC；以頁面為單位的新功能可以評估 Razor Pages。
+> MVC 以 Controller action 為 request entry point，view 通常依 controller / action 放在 `Views`；Razor Pages 以 `.cshtml` page 為中心，PageModel 放在同一個 page 的 code-behind，使用 `OnGet`、`OnPost` handler。兩者都使用 Razor、DI、model binding、validation 和 middleware；filter 體系不同：MVC 用 action filter，Razor Pages 用 page filter（`IPageFilter`／`IAsyncPageFilter`），action filter 不會套到 handler。既有 controller / view 大型專案常維持 MVC；以頁面為單位的新功能可以評估 Razor Pages。
 
 **詳細解釋**
 
@@ -631,7 +639,9 @@ Pages/Products/Edit.cshtml
 Pages/Products/Edit.cshtml.cs  // PageModel
 ```
 
-Razor Pages 把 page-specific handler 和 page model 靠近，頁面導向功能通常比較直接；MVC 對 controller action grouping、既有企業架構、同一 controller 管理多個 related actions 比較熟悉。兩者不是 API 與 HTML 的二分法；Razor Pages 仍是 server-rendered HTML programming model。
+Razor Pages 把 handler 和 PageModel 放在同一個檔案旁邊，頁面導向功能通常比較直接；MVC 適合 controller 管理多個相關 action 的既有企業架構。兩者都能產生伺服器端 HTML。
+
+MVC filter pipeline 在 routing 選定 action 後執行，順序是 Authorization → Resource → model binding → Action → Exception → Result；global filter 包住 controller filter，再包住 action filter。Middleware 則位於更外層，能在 routing 前處理所有 request。
 
 **常見追問**
 
