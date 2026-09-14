@@ -21,25 +21,32 @@ Redis cache 是 application 和主要資料來源之間的快速暫存層；cach
 
 ## 2. ASP.NET Core 語法
 
-### 註冊 Redis 或本機 fallback
+### 註冊 Redis 或明確的本機 fallback
 
 ~~~csharp
 var builder = WebApplication.CreateBuilder(args);
 
 var redisConfiguration =
     builder.Configuration["Redis:Configuration"];
+var allowMemoryFallback = builder.Environment.IsDevelopment()
+    && builder.Configuration.GetValue<bool>("Redis:AllowMemoryFallback");
 
-if (string.IsNullOrWhiteSpace(redisConfiguration))
+if (string.IsNullOrWhiteSpace(redisConfiguration) && allowMemoryFallback)
 {
     builder.Services.AddDistributedMemoryCache();
 }
-else
+else if (!string.IsNullOrWhiteSpace(redisConfiguration))
 {
     builder.Services.AddStackExchangeRedisCache(options =>
     {
         options.Configuration = redisConfiguration;
         options.InstanceName = "dotnet-notebook:";
     });
+}
+else
+{
+    throw new InvalidOperationException(
+        "Redis:Configuration is required outside an explicit Development memory-cache opt-in.");
 }
 ~~~
 
@@ -53,7 +60,7 @@ else
 }
 ~~~
 
-在 Compose 中使用 redis:6379；API 從 host 直接測試時，才可能使用 localhost:6379 或映射後的 host port。不要把兩者混在同一份 production connection string。
+Production 缺少 Redis 設定時要在啟動失敗，不可靜默變成每個 replica 各自一份 memory cache。Compose 中使用 `redis:6379`；API 從 host 直接測試時才使用 `localhost:6379`。TLS、ACL、secret provider、network restriction 與 timeout 要由正式環境設定，localhost-only 範例才可省略 TLS 驗證。
 
 ### Cache-aside
 
@@ -62,11 +69,17 @@ app.MapGet(
     "/products/{id:int}",
     async (
         int id,
+        HttpContext httpContext,
         IDistributedCache cache,
         IProductReader reader,
+        ILogger<Program> logger,
         CancellationToken cancellationToken) =>
     {
-        var key = $"product:{id}";
+        var tenantId = httpContext.Request.Headers["X-Tenant-Id"].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(tenantId))
+            return Results.BadRequest("X-Tenant-Id is required.");
+
+        var key = $"v1:tenant:{Uri.EscapeDataString(tenantId)}:product:{id}";
         var cached = await cache.GetStringAsync(
             key,
             cancellationToken);
@@ -93,8 +106,8 @@ app.MapGet(
             json,
             new DistributedCacheEntryOptions
             {
-                AbsoluteExpirationRelativeToNow =
-                    TimeSpan.FromMinutes(5)
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5),
+                SlidingExpiration = TimeSpan.FromMinutes(1)
             },
             cancellationToken);
 
@@ -111,6 +124,8 @@ Redis hit → 回 cache
   ↓ miss
 database → mapping → 寫 Redis → 回 response
 ~~~
+
+Redis read failure 的 fail-open 只適用於可回 origin 的 cache read；`RedisException` 可記錄後當作 miss，接著查 database。cancellation、設定錯誤、serialization error 不可無條件吞掉。壞 JSON 要記錄 metric、best-effort `RemoveAsync`，再當成 miss；不能把壞資料當成正常 cache hit。
 
 ### Update 時失效 cache
 
@@ -136,6 +151,8 @@ customer:guid:orders:2026-09
 
 key 要包含足夠的 query identity，避免不同使用者、租戶或查詢條件共用錯誤資料。TTL 應根據資料變動速度和可接受的 stale window 決定；TTL 不是資料正確性的替代品。
 
+`v1:tenant:{tenant}:product:{id}` 中的 schema version、tenant 與 permission scope 都要由同一個 key builder 正規化。熱門 key 同時 miss 時會形成 cache stampede；單一 process 可用 semaphore 協調，多 replica 則需 distributed lock、single-flight service 或預熱策略。Redis persistence 要依用途選擇：純 cache 可接受 eviction，session／Data Protection key ring 則需要明確 persistence、ACL、TLS、`maxmemory`、eviction policy 與 metrics。
+
 ## 3. 實務範例：Redis container + .NET 10
 
 本 repo 的 examples/RedisCacheApi 可以在沒有 Redis 時使用 distributed memory cache 執行；設定 Redis connection 後才切換到 Redis。
@@ -150,7 +167,7 @@ curl http://localhost:5081/products/42
 ~~~bash
 docker run --rm \
   --name notebook-redis \
-  --publish 6379:6379 \
+  --publish 127.0.0.1:6379:6379 \
   redis:7.4
 ~~~
 
@@ -172,6 +189,7 @@ dotnet run --project examples/RedisCacheApi/RedisCacheApi.csproj
 - cache 內容通常是 DTO 或 response snapshot，不要直接序列化含 EF Core tracking state 的 entity graph。
 - 使用者、租戶和權限相關資料要避免 key collision；錯誤 key 可能造成資料跨使用者洩漏。
 - Redis container 需要 persistence、memory limit、eviction policy、network security 和 monitoring，不能只寫一行 docker run 就當 production 完成。
+- 多 replica 的 ASP.NET Core 若使用 cookie auth 或 Data Protection，還要共享 key ring 與相同 `SetApplicationName`；純 cache 與 key ring/session 的 persistence 要分開設計。
 
 ## 5. 面試怎麼回答
 
