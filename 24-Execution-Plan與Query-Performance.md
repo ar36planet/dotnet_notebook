@@ -18,13 +18,15 @@ SQL 能得到正確結果只是第一關；execution plan 告訴你 SQL Server �
 ## 2. 實際 SQL
 
 ```sql
-SET STATISTICS IO, TIME ON;
+SET STATISTICS IO ON;
+SET STATISTICS TIME ON;
 
-SELECT u.Id, u.Name
-FROM Users u
-WHERE u.Email = @email;
+SELECT o.OrderId, o.CustomerId, o.TotalAmount
+FROM Orders o
+WHERE o.InvoiceNo = @invoiceNo;
 
-SET STATISTICS IO, TIME OFF;
+SET STATISTICS IO OFF;
+SET STATISTICS TIME OFF;
 ```
 
 在 SSMS：
@@ -36,8 +38,23 @@ SET STATISTICS IO, TIME OFF;
 
 ```sql
 SET SHOWPLAN_XML ON;
--- 之後的 statement 只回傳 estimated plan，不執行。
+GO
+SELECT Id, CustomerId, InvoiceNo
+FROM Orders
+WHERE InvoiceNo = @invoiceNo;
+GO
 SET SHOWPLAN_XML OFF;
+GO
+```
+
+每個 `SHOWPLAN_XML` 設定必須獨立成 batch；它只回傳 estimated plan，不執行查詢。要取得 actual plan，可使用會實際執行查詢的：
+
+```sql
+SET STATISTICS XML ON;
+SELECT Id, CustomerId, InvoiceNo
+FROM Orders
+WHERE InvoiceNo = @invoiceNo;
+SET STATISTICS XML OFF;
 ```
 
 ## 3. 執行結果
@@ -56,6 +73,8 @@ SET SHOWPLAN_XML OFF;
 
 Plan 上的 cost percentage 是相對於該 plan 的估算，不是 wall-clock 百分比；不能只挑最高百分比的 operator 就斷言它是 root cause。
 
+若使用 `STATISTICS IO/TIME`，常見欄位的意義是：`logical reads` 是從 data cache 讀的 pages，`physical reads` 是從磁碟讀的 pages，`read-ahead reads` 是預讀進 cache 的 pages；`CPU time` 與 `elapsed time` 是解析、編譯與執行耗時。沒有 SQL Server 實例時，不把未實測的數字寫成執行結果。
+
 ## 4. SQL Server 背後大概做什麼
 
 ### SARGability
@@ -72,7 +91,7 @@ WHERE CreatedAt >= @from
 ```sql
 WHERE CONVERT(date, CreatedAt) = @day;
 WHERE YEAR(CreatedAt) = 2026;
-WHERE LOWER(Email) = LOWER(@email);
+WHERE LOWER(InvoiceNo) = LOWER(@invoiceNo);
 ```
 
 這不是絕對「一定 scan」的保證，但把 function / conversion 套在 indexed column 上，常讓 optimizer 難以直接用原始 key 定位。可改成 range predicate、建立適當 computed column / index，或在 schema 端統一資料。
@@ -80,11 +99,11 @@ WHERE LOWER(Email) = LOWER(@email);
 ### Implicit conversion
 
 ```sql
--- 如果 UserId 是 int，卻傳入 nvarchar parameter，可能發生 implicit conversion。
-WHERE UserId = @stringParameter;
+-- InvoiceNo 是 varchar(256)，但應用程式送出 nvarchar parameter。
+WHERE InvoiceNo = @invoiceNo;
 ```
 
-型別 precedence、column / parameter type 不一致時，SQL Server 可能在執行時轉換大量資料，並在 plan 顯示警告。ADO.NET / EF Core parameter type 要和欄位對齊，不要把所有輸入都當 string。
+`varchar` 欄位配 `nvarchar` 參數時，SQL Server 會把欄位轉成 `nvarchar`；plan 會出現 `CONVERT_IMPLICIT`／PlanAffectingConvert，讓 seek 失效。EF Core 應用 `.IsUnicode(false)` 或 `HasColumnType("varchar(256)")`，ADO.NET 則使用 `SqlDbType.VarChar`。相反地，`int` 欄位配 `nvarchar` 參數時通常是參數被轉成 `int`，仍可 seek；非數字字串則會直接報 conversion error。
 
 ### 常見查詢問題
 
@@ -92,20 +111,21 @@ WHERE UserId = @stringParameter;
 - 不必要 JOIN：增加 row 數、join cost 與 duplicate risk。
 - `%xxx`：前置 wildcard 通常無法從一般 B-tree 直接定位；`xxx%` 通常較有機會 seek。
 - 不必要 `DISTINCT`：可能觸發 Sort / Hash Aggregate，且常是 JOIN / data model bug 的掩蓋。
-- 大量 `OFFSET`：資料庫仍需跳過前面 rows；頁數越後面通常越昂貴。
+- 大量 `OFFSET`：資料庫仍需跳過前面 rows；頁數越後面通常越昂貴，能用 keyset pagination 時改用 `WHERE Id > @lastId ORDER BY Id`。
 - N+1：不是一條 query 的 plan，而是 application 產生大量 round trips。
 
 ### Parameter sniffing
 
-SQL Server 可能在 stored procedure / parameterized query 編譯時使用當下參數值建立 plan；資料分布高度不均時，這個 plan 對另一個參數可能不理想。SQL Server 2022+ 還有 Parameter Sensitive Plan optimization，但仍應先用實際 plan、Query Store、statistics 與 workload 驗證，不要把 `OPTION (RECOMPILE)` 當萬用藥。
+SQL Server 可能在 stored procedure／parameterized query 編譯時使用當下參數值建立 plan；資料分布高度不均時，這個 plan 對另一個參數可能不理想。SQL Server 2022+ 的 Parameter Sensitive Plan optimization 需要資料庫 compatibility level 160，且目前只處理 equality predicate。仍應先用 actual plan、Query Store、statistics 與 workload 驗證；可比較 `OPTION (RECOMPILE)`、`OPTIMIZE FOR UNKNOWN` 與 `USE HINT('DISABLE_PARAMETER_SNIFFING')`，不要把其中一種當萬用解法。
 
 ## 5. 與 C# / EF Core 的關聯
 
 ```csharp
-var query = db.Users
-    .Where(x => x.IsActive)
-    .OrderBy(x => x.CreatedAt)
-    .Select(x => new UserListItem(x.Id, x.Name));
+var query = db.Orders
+    .TagWith("OrderList")
+    .Where(order => order.CustomerId == customerId)
+    .OrderBy(order => order.CreatedAt)
+    .Select(order => new OrderListItem(order.OrderId, order.TotalAmount));
 
 Console.WriteLine(query.ToQueryString());
 var result = await query.ToListAsync(cancellationToken);
@@ -113,18 +133,24 @@ var result = await query.ToListAsync(cancellationToken);
 
 診斷步驟：
 
-1. 先看 generated SQL，確認沒有過早 `ToList()`。
-2. 用相同 parameters 在 SSMS / Query Store 觀察 actual plan。
+1. 先看 generated SQL，確認沒有過早 `ToList()`；`ToQueryString()` 只顯示將要執行的 SQL，不執行查詢。
+2. 在 SSMS 用相同參數取得 actual plan；Query Store 用來看歷史 plan、平均 duration／logical reads，以及 plan 何時變更。
 3. 比較 estimated / actual rows、logical reads、CPU、duration。
 4. 檢查 index、statistics、data distribution 與 projection。
-5. 修改後重新量測，不以單次本機結果代替 production workload。
+5. 修改後重新量測，不以單次本機結果代替正式環境負載。
+
+`TagWith("OrderList")` 會在 SQL 前加 `-- OrderList`，方便把 LINQ 查詢和 log／Query Store 對回來；實際執行時間、參數與 `CommandExecuted` 事件要用 `LogTo`／`Microsoft.Extensions.Logging` 觀察。
+
+```csharp
+optionsBuilder.LogTo(Console.WriteLine, LogLevel.Information);
+```
+
+實際 log 會包含類似 `Microsoft.EntityFrameworkCore.Database.Command[20101] Executed DbCommand (Nms) ...` 的 command duration；敏感參數預設不記錄，只有在安全的測試環境才開 `EnableSensitiveDataLogging()`。
 
 ## 6. 常見誤區
 
-- Cost percentage 不是實際時間比例，也不能跨不同 query 比較。
 - `NOLOCK` 不是正確效能修復，可能讀到 dirty / duplicated / missing rows。
 - 一看到 scan 就加 index；先確認 query selectivity 與掃描是否其實合理。
-- Estimated plan 沒有 runtime row count；處理 parameter sensitivity / data skew 時常需要 actual plan。
 - `ToQueryString()` 只協助看 SQL，不會顯示實際執行時間與完整 plan。
 
 ## 7. 面試回答
