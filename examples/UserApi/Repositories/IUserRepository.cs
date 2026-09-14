@@ -11,7 +11,7 @@ public interface IUserRepository
     Task<IReadOnlyList<User>> GetAllAsync(
         CancellationToken cancellationToken);
 
-    Task AddAsync(
-        User user,
-        CancellationToken cancellationToken);
+    void Add(User user);
+
+    Task SaveChangesAsync(CancellationToken cancellationToken);
 }

@@ -39,18 +39,18 @@ public sealed class InMemoryUserRepository : IUserRepository
         return Task.FromResult(snapshot);
     }
 
-    public Task AddAsync(
-        User user,
-        CancellationToken cancellationToken)
+    public void Add(User user)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-
         if (!_users.TryAdd(user.Id, user))
         {
             throw new InvalidOperationException(
                 $"A user with id {user.Id} already exists.");
         }
+    }
 
+    public Task SaveChangesAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         return Task.CompletedTask;
     }
 }

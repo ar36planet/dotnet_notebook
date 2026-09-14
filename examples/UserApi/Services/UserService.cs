@@ -38,7 +38,7 @@ public sealed class UserService(
         if (string.IsNullOrWhiteSpace(request.Name))
         {
             throw new ArgumentException(
-                "Name is required.", nameof(request));
+                "Name is required.", nameof(request.Name));
         }
 
         var user = new User
@@ -49,7 +49,8 @@ public sealed class UserService(
             CreatedAt = clock.UtcNow
         };
 
-        await repository.AddAsync(user, cancellationToken);
+        repository.Add(user);
+        await repository.SaveChangesAsync(cancellationToken);
         return ToResponse(user);
     }
 
