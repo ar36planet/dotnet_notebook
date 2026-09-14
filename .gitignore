@@ -12,3 +12,7 @@ prof/
 tsconfig.tsbuildinfo
 
 .claude/settings.local.json
+secrets/*
+!secrets/README.md
+examples/ComposeSqlServer/secrets/*
+!examples/ComposeSqlServer/secrets/README.md

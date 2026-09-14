@@ -7,7 +7,7 @@ tags: [docker, docker-compose, aspnet-core, sql-server, ef-core]
 
 ## 學習目標
 
-- 用 Compose 描述 API、frontend、SQL Server 三個 service。
+- 用 Compose 描述 API 與 SQL Server service；沒有 frontend 時不要在文件宣稱有第三個 service。
 - 分辨 host port 和 service-to-service port。
 - 用 Compose service name 連線，不依賴 localhost 或硬編 IP。
 - 為 SQL Server volume、health check、migration 和秘密設定清楚的責任。
@@ -24,7 +24,6 @@ Docker Compose 是一份可版本控制的多 container 執行描述；每個 se
 ### Service name 和 port
 
 ~~~text
-Browser → host localhost:8080 → frontend container:8080
 Browser / client → host localhost:8081 → API container:8080
 API container → db:1433 → SQL Server container:1433
 ~~~
@@ -37,53 +36,68 @@ API container → db:1433 → SQL Server container:1433
 services:
   api:
     build:
-      context: ./src/Orders.Api
+      context: ./Api
       dockerfile: Dockerfile
     environment:
       ASPNETCORE_HTTP_PORTS: 8080
-      ConnectionStrings__Orders: >-
-        Server=db,1433;Database=Orders;
-        User Id=sa;Password=${MSSQL_SA_PASSWORD};
-        TrustServerCertificate=True
+      DB_HOST: db,1433
+      DB_NAME: Orders
+      DB_USER: orders_app
+      DB_PASSWORD_FILE: /run/secrets/app_db_password
+    secrets:
+      - app_db_password
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
 
   db:
-    image: mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04
+    build:
+      context: ./db
+      dockerfile: Dockerfile
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_PID: Developer
-      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
-    ports:
-      - "15433:1433"
+    secrets:
+      - sa_password
+      - app_db_password
     volumes:
       - sqlserver-data:/var/opt/mssql
     healthcheck:
       test:
         - CMD-SHELL
         - >-
-          /opt/mssql-tools18/bin/sqlcmd
-          -S localhost -U sa
-          -P "${MSSQL_SA_PASSWORD}"
-          -C -Q "SELECT 1" || exit 1
+          SQLCMDPASSWORD="$$(cat /run/secrets/sa_password)"
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -Q "SELECT 1"
+          >/dev/null 2>&1 || exit 1
       interval: 10s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+secrets:
+  sa_password:
+    file: ./secrets/sa_password.txt
+  app_db_password:
+    file: ./secrets/app_db_password.txt
 
 volumes:
   sqlserver-data:
 ~~~
 
-Compose 變數放在未提交的 .env：
+本機 secret 放在未提交的檔案：
 
-~~~dotenv
-MSSQL_SA_PASSWORD=只在本機使用的長密碼
+~~~bash
+printf '%s' '由本機 secret provider 產生的長密碼' > examples/ComposeSqlServer/secrets/sa_password.txt
+printf '%s' '由本機 secret provider 產生的 app 密碼' > examples/ComposeSqlServer/secrets/app_db_password.txt
 ~~~
 
-不要把這個檔案提交到 repository。正式環境使用部署平台的 secret，並確認 SQL Server image、sqlcmd 路徑和 license policy 都符合實際版本。
+不要把這些檔案提交到 repository。正式環境使用部署平台的 secret，application 不使用 `sa`；確認 SQL Server image digest、sqlcmd 路徑和 license policy 都符合實際版本。
 
 ### depends_on 和 readiness
 
@@ -118,33 +132,42 @@ builder.Services.AddDbContext<OrdersDbContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("Orders")));
 builder.Services.AddHealthChecks()
-    .AddDbContextCheck<OrdersDbContext>();
+    .AddDbContextCheck<OrdersDbContext>("sql", tags: ["ready"]);
 
 var app = builder.Build();
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate = _ => false
+});
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
 app.MapControllers();
 app.Run();
 ~~~
 
-同一段 code 在本機可以使用 Server=localhost,15433，在 Compose 裡則使用 Server=db,1433。這就是 configuration externalization：程式碼不因環境變更而分叉。
+同一段 code 在 localhost-only development override 可使用 `Server=localhost,15433`，在本 Compose stack 則使用 `DB_HOST=db,1433`。這就是設定外部化：程式碼不因環境變更而分叉。正式環境應使用受信任 certificate 與 hostname validation；本範例的 `TrustServerCertificate` 只限本機 development。
 
 ### 常用 Compose commands
 
 ~~~bash
-docker compose config
-docker compose up --build -d
-docker compose ps
-docker compose logs -f api
-docker compose exec api printenv ASPNETCORE_ENVIRONMENT
-docker compose down
-docker compose down --volumes  # 會刪資料庫 volume，先確認範圍
+docker compose -f examples/ComposeSqlServer/compose.yaml config --quiet
+docker compose -f examples/ComposeSqlServer/compose.yaml up --build --wait
+curl http://127.0.0.1:8081/health/live
+curl http://127.0.0.1:8081/health/ready
+curl 'http://127.0.0.1:8081/api/orders?pageSize=20'
+docker compose -f examples/ComposeSqlServer/compose.yaml ps
+docker compose -f examples/ComposeSqlServer/compose.yaml logs api
+docker compose -f examples/ComposeSqlServer/compose.yaml down
+docker compose -f examples/ComposeSqlServer/compose.yaml down --volumes  # 會刪資料庫 volume，先確認範圍
 ~~~
 
 docker compose down 預設不刪 named volume；--volumes 會讓資料庫資料消失，只有在明確要重置本機資料時使用。
 
 ### Frontend、API 和 CORS
 
-如果 browser 直接從不同 origin 呼叫 API，需要設定 CORS；如果 frontend server-side proxy API，則 browser 可能只看到同一個 origin。先畫出實際 request path，再決定是否需要 CORS：
+如果另一個 frontend 直接從不同 origin 呼叫 API，需要設定 CORS；如果由同 origin server-side proxy 轉發，瀏覽器可能只看到一個 origin。先畫出實際 request path，再決定是否需要 CORS：
 
 ~~~text
 Browser → frontend origin → server-side API call
@@ -167,12 +190,12 @@ Browser → api origin
 - volume 是資料生命週期的一部分；刪除 volume 可能刪掉整個 SQL Server database。
 - Compose 可以建立 network，但不會自動替 application 設計 retry、timeout、migration lock 或 transaction。
 - CORS 解決 browser origin policy，不解決 container 之間的 DNS、authentication 或 network isolation。
-- MSSQL_SA_PASSWORD 不應使用教材中的固定示範密碼，也不應放在公開 Compose 檔案。
-- latest 會讓教材今天能跑、明天不一定能重現；資料庫 image 更要釘版本。
+- SQL Server admin password 與 app password 由 secret file／平台 secret 注入；不應放在公開 Compose 檔案、argv 或 log。application 使用獨立 `orders_app`，不使用 `sa`。
+- mutable tag 會讓教材今天能跑、明天不一定能重現；資料庫 image 要用明確版本，production deployment 再 pin digest。
 
 ## 5. 面試怎麼回答
 
-> Docker Compose 用 YAML 描述多個 container service。API、frontend 和 database 各自有 image、environment、port、network 和 volume；同一個 Compose network 裡，API 用 database 的 service name 和 container port 連線，例如 db:1433，不是 localhost。depends_on 可以描述啟動依賴，但資料庫 readiness、migration、retry 和 backup 仍要由 application / deployment workflow 負責。密碼應由 .env、secret store 或部署平台注入，不寫進 image 或 Git。
+> Docker Compose 用 YAML 描述多個 container service。API 和 database 各自有 image、environment、port、network 和 volume；同一個 Compose network 裡，API 用 database 的 service name 和 container port 連線，例如 db:1433，不是 localhost。depends_on 可以描述啟動依賴，但資料庫 readiness、migration、retry 和 backup 仍要由 application／deployment workflow 負責。密碼應由 secret file、secret store 或部署平台注入，不寫進 image 或 Git。
 
 ## 6. 小練習
 

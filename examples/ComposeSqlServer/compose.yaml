@@ -1,0 +1,56 @@
+services:
+  api:
+    build:
+      context: ./Api
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_HTTP_PORTS: "8080"
+      DB_HOST: db,1433
+      DB_NAME: Orders
+      DB_USER: orders_app
+      DB_PASSWORD_FILE: /run/secrets/app_db_password
+    secrets:
+      - app_db_password
+    ports:
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  db:
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+    secrets:
+      - sa_password
+      - app_db_password
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          SQLCMDPASSWORD="$$(cat /run/secrets/sa_password)"
+          /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -Q "SELECT 1"
+          >/dev/null 2>&1 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+secrets:
+  sa_password:
+    file: ./secrets/sa_password.txt
+  app_db_password:
+    file: ./secrets/app_db_password.txt
+
+volumes:
+  sqlserver-data:
