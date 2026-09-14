@@ -79,7 +79,7 @@ INCLUDE (ProductCode, Quantity, UnitPrice);
 ```text
 GET  /api/users
 GET  /api/users/{id}
-GET  /api/users/{id}/orders
+GET  /api/users/{id}/orders?pageSize=50&beforeCreatedAt=...&beforeId=...
 POST /api/orders
 ```
 
@@ -194,15 +194,26 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         entity.HasKey(x => x.Id);
         entity.HasIndex(x => x.Email).IsUnique();
-        entity.Property(x => x.Email).HasMaxLength(320).IsUnicode();
+        entity.Property(x => x.Email)
+            .HasMaxLength(320)
+            .IsUnicode();
+        entity.Property(x => x.DisplayName)
+            .HasMaxLength(200)
+            .IsUnicode();
         entity.Property(x => x.Version).IsRowVersion();
     });
 
     modelBuilder.Entity<Order>(entity =>
     {
         entity.HasKey(x => x.Id);
+        entity.Property(x => x.Status)
+            .HasMaxLength(20)
+            .IsUnicode(false);
         entity.Property(x => x.TotalAmount).HasPrecision(19, 4);
-        entity.HasIndex(x => new { x.UserId, x.CreatedAt, x.Id });
+        entity.Property(x => x.CreatedAt).HasColumnType("datetimeoffset(7)");
+        entity.HasIndex(x => new { x.UserId, x.CreatedAt, x.Id })
+            .IncludeProperties(x => new { x.Status, x.TotalAmount })
+            .IsDescending(false, true, true);
         entity.HasOne(x => x.User)
             .WithMany(x => x.Orders)
             .HasForeignKey(x => x.UserId);
@@ -211,6 +222,9 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
     modelBuilder.Entity<OrderItem>(entity =>
     {
         entity.HasKey(x => x.Id);
+        entity.Property(x => x.ProductCode)
+            .HasMaxLength(50)
+            .IsUnicode(false);
         entity.Property(x => x.UnitPrice).HasPrecision(19, 4);
         entity.HasIndex(x => x.OrderId);
     });
@@ -232,7 +246,7 @@ public async Task<IReadOnlyList<UserListItem>> GetUsersAsync(
     int pageSize,
     CancellationToken cancellationToken)
 {
-    var query = db.Users
+    IQueryable<User> query = db.Users
         .AsNoTracking()
         .Where(x => x.IsActive)
         .OrderByDescending(x => x.CreatedAt)
@@ -272,14 +286,31 @@ public sealed record OrderDto(
     DateTimeOffset CreatedAt,
     IReadOnlyList<OrderItemDto> Items);
 
-public Task<List<OrderDto>> GetOrdersAsync(
+public async Task<IReadOnlyList<OrderDto>> GetOrdersAsync(
     Guid userId,
+    DateTimeOffset? beforeCreatedAt,
+    long? beforeId,
+    int pageSize,
     CancellationToken cancellationToken)
-    => db.Orders
+{
+    IQueryable<Order> query = db.Orders
         .AsNoTracking()
         .Where(x => x.UserId == userId)
+        .AsQueryable();
+
+    if (beforeCreatedAt is not null && beforeId is not null)
+    {
+        var cursorCreatedAt = beforeCreatedAt.Value;
+        var cursorId = beforeId.Value;
+        query = query.Where(order =>
+            order.CreatedAt < cursorCreatedAt
+            || (order.CreatedAt == cursorCreatedAt && order.Id < cursorId));
+    }
+
+    return await query
         .OrderByDescending(x => x.CreatedAt)
         .ThenByDescending(x => x.Id)
+        .Take(Math.Clamp(pageSize, 1, 100))
         .Select(x => new OrderDto(
             x.Id,
             x.Status,
@@ -293,9 +324,10 @@ public Task<List<OrderDto>> GetOrdersAsync(
                     i.UnitPrice))
                 .ToList()))
         .ToListAsync(cancellationToken);
+}
 ```
 
-這個 query 讓 EF Core 產生 provider 可翻譯的 SQL shape；在使用前仍要檢查 generated SQL、實際 row 數與 query plan。對某些 nested collection / provider 版本，可能需要改成兩段批次查詢或明確 split strategy。
+這個 query 固定 page size 上限 100，並用 `CreatedAt + Id` 建立完整排序。若要回傳下一頁，response 另帶最後一筆的兩個 cursor 值；不要把 `pageSize` 無上限交給 caller。使用前仍要檢查產生的 SQL、實際 row 數與 query plan。
 
 ### POST order：transaction + async
 
@@ -320,7 +352,9 @@ public async Task<OrderDto> CreateOrderAsync(
         throw new ArgumentException("Invalid order item.");
 
     await using var transaction = await db.Database
-        .BeginTransactionAsync(cancellationToken);
+        .BeginTransactionAsync(
+            System.Data.IsolationLevel.Serializable,
+            cancellationToken);
 
     var userExists = await db.Users
         .AsNoTracking()
@@ -363,6 +397,20 @@ public async Task<OrderDto> CreateOrderAsync(
 ```
 
 此範例的價格由 request 傳入只是教學簡化；真實電商通常從 server-side product / price source 取價，避免 client 任意改價，並把 inventory / payment 的 transaction boundary 分開設計。
+
+這裡用 `Serializable` 保護「確認 active user → 建立 order」的 invariant，但會增加 blocking／deadlock 成本；也可以用 `UPDLOCK` 鎖住該 user row，並配合固定鎖定順序與有限 retry。若只使用預設 `READ COMMITTED`，active check 與後續寫入之間仍可能被其他 transaction 改變。
+
+### API error contract
+
+| 情況 | HTTP status | 回應 |
+| --- | ---: | --- |
+| JSON／model validation 失敗 | 400 | `ProblemDetails` 或 validation details |
+| user／order 不存在 | 404 | `ProblemDetails` |
+| rowversion／domain concurrency conflict | 409 | `ProblemDetails`，告知重新讀取後再試 |
+| dependency 暫時失敗 | 503 | `ProblemDetails`，附 trace metadata |
+| 未預期例外 | 500 | 不洩漏內部 exception |
+
+`IExceptionHandler` 應集中把 domain exception 映射到上述 contract；不要讓 service 的 `ArgumentException` 未處理地變成 500，也不要在 controller 各自組不同 error JSON。
 
 ## 6. 常見誤區
 
