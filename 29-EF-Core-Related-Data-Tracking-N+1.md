@@ -13,7 +13,7 @@ tags: [ef-core, sql-server, n-plus-one, tracking, include]
 
 ## 1. 一句話理解
 
-EF Core 可以幫你 materialize object graph，但 navigation loading、change tracking 與 query shape 若不明確，很容易產生 N+1、cartesian explosion 或不必要的 memory overhead。
+關聯資料怎麼載入、是否追蹤，以及產生幾條 SQL，必須在查詢時決定；否則容易出現 N+1、重複資料與記憶體成本。
 
 ## 2. 實際 SQL
 
@@ -39,6 +39,8 @@ foreach (var user in users)
 = N+1 queries
 ```
 
+把 `DbContextOptionsBuilder.LogTo(Console.WriteLine, LogLevel.Information)` 開在測試環境，計算 `Microsoft.EntityFrameworkCore.Database.Command` 行數；N+1 應看到 1 條 users command + N 條 orders command，`Include`／projection／`AsSplitQuery` 則比較各自的 SQL 與 command count。沒有固定 provider、版本與 seed data 時，不把 SQL 或「只有一條 query」寫成實測結果。
+
 ### Eager loading
 
 ```csharp
@@ -48,7 +50,24 @@ var users = await db.Users
     .ToListAsync(cancellationToken);
 ```
 
-`Include` / `ThenInclude` 明確載入 related entity，但不是「永遠最佳」；多個 collection include 可能產生 cartesian explosion 或非常寬的 result set。
+`Include`／`ThenInclude` 是 eager loading。`Orders.ThenInclude(Items)` 是巢狀 collection，不會造成同層 collection 的 cartesian explosion；真正的 cross product 例子是同時 `Include(x => x.Orders).Include(x => x.Roles)`。單一 collection 仍可能重複 user 欄位，但那是 data duplication。EF Core 預設是 single-query mode，不會自動替每個查詢選 split query。
+
+三種 loading 方式的前提：
+
+| 方式 | 何時發 SQL | 必要設定／風險 |
+| --- | --- | --- |
+| eager | 初始 query | `Include`／projection；同層 collections 可能產生 row multiplication |
+| explicit | 呼叫 `Entry(...).Collection(...).LoadAsync()` 時 | 完全由程式控制，迴圈內呼叫仍會形成 N+1 |
+| lazy | 存取 navigation 時 | 不是 POCO 預設行為；需 proxies + `UseLazyLoadingProxies()` 且 navigation `virtual`，容易 N+1 |
+
+explicit loading 範例：
+
+```csharp
+var user = await db.Users.SingleAsync(user => user.Id == userId, cancellationToken);
+await db.Entry(user).Collection(user => user.Orders).LoadAsync(cancellationToken);
+```
+
+lazy proxy 需要 `Microsoft.EntityFrameworkCore.Proxies`、`options.UseLazyLoadingProxies()`，以及可覆寫的 `virtual` navigation；`ILazyLoader` 是另一條明確注入路徑。
 
 ## 3. 執行結果
 
@@ -56,13 +75,13 @@ var users = await db.Users
 
 ```csharp
 var result = await db.Users
-    .AsNoTracking()
     .Select(u => new UserWithOrderCount(
         u.Id,
         u.Name,
         u.Orders.Count,
         u.Orders
             .OrderByDescending(o => o.CreatedAt)
+            .ThenByDescending(o => o.Id)
             .Take(5)
             .Select(o => new OrderSummary(o.Id, o.TotalAmount))
             .ToList()))
@@ -70,6 +89,8 @@ var result = await db.Users
 ```
 
 結果是 DTO shape，不必載入 entity graph 的所有欄位，也不會因為只需要 count 就把所有 orders materialize 到 application。
+
+這個 DTO-only projection 本來就不會追蹤 entity，`AsNoTracking()` 在此是冗餘的；若 projection 同時帶出 entity instance，該 entity 仍可能被 tracking。
 
 ### Tracking vs no tracking
 
@@ -103,9 +124,13 @@ var users = await db.Users
 
 Split query 不是「零成本修復」：它可能減少 row multiplication，也可能在 concurrent update 下需要更仔細的一致性判斷。依 query shape 與 actual SQL / plan 決定。
 
+Filtered Include（EF Core 5+）在 tracking query 中可能被 relationship fix-up 回填先前已追蹤、但不符合 filter 的 entities；該 navigation 也會被視為已載入。要隔離這個行為，使用新的短生命週期 `DbContext`、`AsNoTracking()` 或直接投影 DTO。
+
+版本備註：lazy-loading proxies 自 EF Core 2.1；Filtered Include、split query、`AsNoTrackingWithIdentityResolution()` 自 EF Core 5；EF Core 8 支援 untracked entity 的 lazy／explicit loading；EF Core 10 修正 split query 搭配 `Skip`／`Take` 時各 SQL ordering 的一致性問題。
+
 ### Change tracker
 
-Tracking query 會保存 entity state、原始值與 key identity，讓：
+EF Core 預設使用 snapshot change tracking；entity 被追蹤時保存 property values 與 key identity，讓：
 
 ```csharp
 var user = await db.Users.SingleAsync(x => x.Id == id, cancellationToken);
