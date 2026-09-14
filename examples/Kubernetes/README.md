@@ -62,3 +62,9 @@ kubectl logs -n dotnet-notebook \
 ## Forwarded headers
 
 Ingress／Gateway 必須只由可信 proxy 寫入 `X-Forwarded-For`、`X-Forwarded-Proto` 等 header。ASP.NET Core 應在 `UseForwardedHeaders` 中明確列出 trusted proxy IP 或 network，不能用「接受所有 proxy」的設定掩蓋邊界；如果 application 不依賴 scheme、client IP 或 redirect URL，就不要為了看起來完整而無條件信任外部 header。
+
+## Autoscaling overlays
+
+`hpa-resource.yaml` 和 `hpa-rabbitmq-external.yaml` 是互斥的 HPA 選項，不能同時套用到同一個 Deployment。HPA 接管 replicas 後，Deployment base manifest 不應再由 GitOps 每次寫回固定的 `spec.replicas`。`vpa-recommendation.yaml` 可以和 CPU HPA 一起使用，因為它是 `updateMode: Off` 且只觀察 memory recommendation；VPA CRD 和 components 要先按相容版本安裝。
+
+RabbitMQ HPA 需要 Prometheus exporter、Prometheus、Prometheus Adapter 的 `externalRules` 和 `external.metrics.k8s.io` APIService；只套用 HPA object 不會產生 queue metric。Adapter 的 Helm values 範例在 `prometheus-adapter-values.example.yaml`。

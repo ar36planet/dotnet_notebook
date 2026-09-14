@@ -1,0 +1,24 @@
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: products-api-recommendation
+  namespace: dotnet-notebook
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: products-api
+  updatePolicy:
+    # Recommendation-only: never evict or mutate an existing Pod.
+    updateMode: Off
+  resourcePolicy:
+    containerPolicies:
+      - containerName: products-api
+        # HPA uses CPU utilization; do not let VPA change the CPU denominator.
+        controlledResources:
+          - memory
+        controlledValues: RequestsOnly
+        minAllowed:
+          memory: 64Mi
+        maxAllowed:
+          memory: 1Gi

@@ -1,0 +1,19 @@
+prometheus:
+  # Replace with the Prometheus Service in the monitoring namespace.
+  url: http://kube-prometheus-stack-prometheus.monitoring.svc
+  port: 9090
+
+rules:
+  # Resource metrics are normally supplied by metrics-server. Do not enable
+  # another resource metrics provider here unless the cluster has one owner.
+  default: false
+  external:
+    - seriesQuery: '{__name__="rabbitmq_queue_messages_ready",queue!="",vhost!=""}'
+      resources:
+        # RabbitMQ queue labels are not Kubernetes object labels. The HPA
+        # selects the queue and vhost explicitly, so keep this metric external.
+        namespaced: false
+      name:
+        matches: '^rabbitmq_queue_messages_ready$'
+        as: rabbitmq_queue_messages_ready
+      metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (queue, vhost)'
