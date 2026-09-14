@@ -5,6 +5,8 @@ tags: [sql-server, mssql, interview, ef-core]
 
 # 32 MSSQL / EF Core 面試快速複習
 
+基準：SQL Server 2022／compatibility level 160、.NET 10、EF Core 10；若題目指定其他版本，以該版本文件為準。
+
 ## 學習目標
 
 - 把 SQL Server 常見面試題壓縮成 30 秒回答。
@@ -17,6 +19,15 @@ SQL Server 面試不只是問語法，而是看你能不能從 result set、NULL
 
 ## 2. 實際 SQL
 
+### 資料型別速查
+
+| 題目 | 30 秒回答 |
+| --- | --- |
+| `varchar`／`nvarchar`？ | `varchar` 依 collation 決定編碼；SQL Server 2019+ 的 `_UTF8` collation 可存 Unicode，`n` 是 bytes。`nvarchar` 使用 UTF-16 byte-pair。 |
+| `datetime2`／`datetimeoffset`？ | `datetime2` 沒有 offset；需要事件當時的 offset 用 `datetimeoffset`，但完整 time-zone rules 仍要另存。 |
+| `decimal(p,s)`？ | `p` 是總位數、`s` 是小數位數；`decimal(19,4)` 是 15 位整數 + 4 位小數。 |
+| `rowversion`？ | SQL Server 自動產生的 binary concurrency token，不是日期時間；EF Core 用 `.IsRowVersion()`。 |
+
 ### SQL 題型 snippets
 
 ```sql
@@ -26,9 +37,10 @@ FROM Users u
 LEFT JOIN Orders o
     ON o.UserId = u.Id
    AND o.Status = 'Paid'
-GROUP BY u.Id, u.Name
-HAVING COUNT(o.Id) > 0;
+GROUP BY u.Id, u.Name;
 ```
+
+這樣會保留沒有 Paid order 的 user，`COUNT(o.Id)` 為 0；若需求是只列出有 Paid order 者，才加 `HAVING COUNT(o.Id) > 0`。
 
 ```sql
 -- CTE + window：每個 user 最新 order
@@ -75,14 +87,14 @@ SELECT * FROM Users WHERE DeletedAt IS NULL;
 | Composite index？ | `(A, B)` 先按 A 再按 B；leading key / leftmost 重要，單獨查 B 通常不能像查 A 一樣直接 seek。 |
 | Covering index？ | Index 已包含 filter / join / projection 需要的資訊，可能避免回 base table 的 Key Lookup；但增加 storage 與 write cost。 |
 | Seek vs scan？ | Seek 在 index 中定位範圍；scan 讀大量或全部 index/table。Scan 不一定錯，取決於 selectivity 與 query 要讀多少資料。 |
-| Key Lookup？ | nonclustered index 找到 key 後，再回 clustered index / heap 取其他欄位；大量 lookup 可能成為瓶頸。 |
+| Key Lookup？ | clustered table 的 nonclustered index 回表 operator；heap 使用 `RID Lookup`。大量 lookup 可能成為瓶頸。 |
 
 ### Transaction / concurrency 題
 
 | 問題 | 30 秒回答 |
 | --- | --- |
 | ACID？ | Atomicity 全成或全敗；Consistency 維持 invariant；Isolation 控制併發可見性；Durability commit 後持久。 |
-| Isolation level？ | 越高通常一致性越強、locking / blocking 成本越高；READ COMMITTED 是常見預設，SNAPSHOT 用 row version，SERIALIZABLE 提供最強隔離但可能降低 concurrency。 |
+| Isolation level？ | lock-based 與 row-versioned 是兩條路。READ COMMITTED 是否用 shared lock 受 RCSI 影響；SNAPSHOT 要 `ALLOW_SNAPSHOT_ISOLATION ON`；SERIALIZABLE 用 range lock，成本是 blocking。 |
 | Dirty / non-repeatable / phantom？ | Dirty 讀到未 commit；non-repeatable 同一 transaction 兩次讀同一 row 得不同值；phantom 第二次讀出現新增／消失的符合範圍 row。 |
 | Blocking vs deadlock？ | Blocking 是等待別人的 lock；deadlock 是互相等待 cycle，SQL Server 選 victim rollback。 |
 | Optimistic concurrency？ | 不先長時間鎖住 row，以 `rowversion` / token 在 update 時驗證原始版本，衝突時回錯誤並由 application 處理。 |
@@ -91,23 +103,23 @@ SELECT * FROM Users WHERE DeletedAt IS NULL;
 
 | 問題 | 30 秒回答 |
 | --- | --- |
-| Execution plan？ | 顯示 optimizer 選的 scan / seek / join / sort 等 operators；要比較 actual vs estimated rows、logical reads、CPU、duration 與 warnings。 |
+| Execution plan？ | estimated plan 不執行、沒有 runtime rows；actual plan 執行後才有 runtime rows／warnings。logical reads 用 `STATISTICS IO`，CPU／duration 用 `STATISTICS TIME`。 |
 | SARGability？ | 讓 predicate 能利用 column key 定位；對 indexed column 套 `CONVERT` / `YEAR` / `LOWER` 可能妨礙 seek，應改 range 或 computed index 等方案。 |
-| Parameter sniffing？ | 編譯時用當下 parameter 建 plan；資料分布不均時同一 cached plan 對其他參數可能不理想。先用 Query Store / actual plan 驗證。 |
+| Parameter sniffing？ | 傳統上同一 cached plan 可能不適合不同參數；SQL Server 2022 compat 160 的 eligible query 可用 PSP 維持多個 plan variants。用 Query Store 看歷史 plan、用 actual plan 看 runtime。 |
 | `SELECT *` 問題？ | 多讀欄位、增加 network / memory、讓 covering index 更難、也讓 API contract 暴露更多資料。 |
-| OFFSET 為何越翻越慢？ | SQL Server 仍可能需要找到並丟棄前面大量 rows；大資料 feed 可用 keyset pagination。 |
+| OFFSET 為何越翻越慢？ | SQL Server 仍需處理前面 rows；SQL Server 2012+ 要 `ORDER BY`。大資料可用 keyset，且排序必須完全唯一，例如 `CreatedAt DESC, Id DESC`。 |
 
 ### EF Core 題
 
 | 問題 | 30 秒回答 |
 | --- | --- |
-| `IEnumerable` vs `IQueryable`？ | IEnumerable 在 memory 執行；IQueryable 保留 expression tree，EF Core 可翻成 SQL，到 `ToListAsync` 等 terminal operation 才執行。 |
+| `IEnumerable` vs `IQueryable`？ | `IEnumerable` 只代表可列舉；切到 `AsEnumerable` 後的 operator 由 .NET 執行但仍可能串流。`IQueryable` 保留 expression tree，EF Core 可翻成 SQL。 |
 | Tracking vs `AsNoTracking`？ | Tracking 保存 entity state、identity 與修改偵測；read-only query / DTO 通常用 no-tracking 或 projection。 |
 | `Include` vs projection？ | Include 載入 entity graph；projection 只取 DTO 所需欄位，對 API read model 常較精準。兩者都要觀察 SQL shape。 |
 | N+1？ | 1 次查 parent + N 次查 child；改成 projection、批次 query、合理 Include / split query。 |
 | `FirstOrDefault` vs `SingleOrDefault`？ | First 允許多筆只取第一；Single 要求最多一筆，>1 就錯，適合 unique invariant。 |
 | `FindAsync`？ | 以 primary key lookup，先查同一 `DbContext` 的 tracked entity，沒有才查 DB；不是任意 predicate 查詢。 |
-| `SaveChangesAsync`？ | 偵測 tracked changes、產生 write commands，通常在需要時包 transaction；實際 commit boundary 依 provider / transaction scope。 |
+| `SaveChangesAsync`？ | 單次呼叫若 provider 支援 transaction，預設全成功或全不寫；多次呼叫、跨 context 或外部工作才需顯式 transaction，注意 execution strategy／savepoint／MARS。 |
 
 ## 5. 與 C# / EF Core 的關聯
 
