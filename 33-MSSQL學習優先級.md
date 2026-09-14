@@ -5,6 +5,8 @@ tags: [sql-server, mssql, learning-plan, interview]
 
 # 33 MSSQL / EF Core 學習優先級
 
+版本基線：SQL Server 2022／compatibility level 160、EF Core 10、.NET 10。SQL Server 2019+、2025 的差異在條目旁標示；EF provider 的 `UseCompatibilityLevel` 不會改變實際資料庫 compatibility level。
+
 ## 學習目標
 
 - 分辨 Backend developer 必須熟練的 SQL Server mental model 與 DBA 深度主題。
@@ -21,7 +23,7 @@ tags: [sql-server, mssql, learning-plan, interview]
 -- A 級：應能自行寫並解釋
 WITH Ranked AS
 (
-    SELECT o.*,
+    SELECT o.Id, o.UserId, o.Status, o.CreatedAt,
         ROW_NUMBER() OVER
         (
             PARTITION BY UserId
@@ -29,12 +31,13 @@ WITH Ranked AS
         ) AS rn
     FROM Orders o
 )
-SELECT * FROM Ranked WHERE rn = 1;
+SELECT Id, UserId, Status, CreatedAt
+FROM Ranked
+WHERE rn = 1;
 ```
 
 ```csharp
 var orders = await db.Orders
-    .AsNoTracking()
     .Where(x => x.UserId == userId)
     .OrderByDescending(x => x.CreatedAt)
     .ThenByDescending(x => x.Id)
@@ -48,15 +51,19 @@ var orders = await db.Orders
 ### A：一定要會
 
 - JOIN：INNER / LEFT、ON vs WHERE、1-to-many row multiplication。
+- 資料型別與 mapping：`decimal(p,s)`、`varchar`／`nvarchar`、`datetime2`／`datetimeoffset`、`rowversion`、隱含轉換與 EF Core column configuration。
+- 資料完整性：PRIMARY KEY、FOREIGN KEY、UNIQUE、CHECK、DEFAULT、NULLability；每個 constraint 都要能說出保護的 invariant。
 - WHERE / GROUP BY / HAVING / ORDER BY 的 logical processing 直覺。
 - NULL、`IS NULL`、三值邏輯、`ISNULL` / `COALESCE` / `NULLIF`。
 - Subquery、CTE、derived table。
 - Window function：`ROW_NUMBER`、`RANK`、`LAG`、`SUM OVER`、top-N-per-group。
 - Clustered / nonclustered index、composite leading key、seek / scan 基礎。
 - Estimated / actual execution plan 基礎與 estimated vs actual rows。
-- Transaction、ACID、READ COMMITTED 基本語意。
+- Transaction、ACID、READ COMMITTED 與 RCSI 基本語意：RCSI OFF 時使用 shared lock，ON 時改用 statement-level row versioning；兩者仍可能有 nonrepeatable／phantom read。
 - Lock / blocking / deadlock 基礎。
 - `IEnumerable` vs `IQueryable`、`ToListAsync` execution boundary。
+- SQL／LINQ 參數化：`FromSql`／`FromSqlInterpolated` 與 `FromSqlRaw` 的差異、`DbParameter`、SQL injection 邊界。
+- LINQ translation boundary：top-level projection 的 client evaluation、其他位置翻譯失敗時的 runtime exception、用 `ToQueryString()`／logging 驗證 SQL。
 - EF Core `DbContext` / `DbSet`、projection、`AsNoTracking`。
 - EF Core N+1、`Include` / `ThenInclude`、`First` / `Single` / `Find`。
 - `SaveChangesAsync`、migration 基本流程、rowversion optimistic concurrency。
@@ -66,7 +73,7 @@ var orders = await db.Orders
 - Covering index、Included columns、Key Lookup。
 - SARGability、implicit conversion、`SELECT *`、unnecessary DISTINCT。
 - Parameter sniffing / parameter-sensitive plans。
-- SNAPSHOT / RCSI、row versioning 與 tempdb trade-off。
+- SNAPSHOT（transaction-level versioning、需 `ALLOW_SNAPSHOT_ISOLATION ON`）、RCSI 與 row version store；傳統 version store 在 `tempdb`，SQL Server 2019+ 啟用 ADR 時可使用資料庫內 PVS。
 - Optimistic vs pessimistic concurrency。
 - `#TempTable` vs `@TableVariable` vs CTE。
 - OFFSET/FETCH vs keyset pagination。
@@ -130,9 +137,12 @@ DTO input
 ```csharp
 catch (SqlException ex) when (ex.Number == 1205)
 {
-    // 只對可安全重試的 idempotent / transaction operation 做有限 retry。
+    // 只記錄並交由外層以新 transaction 重跑整個工作單元；最後重新拋出。
+    throw;
 }
 ```
+
+實際重試要包住完整 transaction delegate，設定最大次數、退避與 jitter；不能只重送其中一個 statement。commit 結果不明或寫入不可證明冪等時不可盲目重播。
 
 ## 6. 常見誤區
 
@@ -144,7 +154,7 @@ catch (SqlException ex) when (ex.Number == 1205)
 
 ## 7. 面試回答
 
-> 我把 SQL Server 能力分三層：A 級是日常 backend 必須會的 query semantics、NULL、JOIN、CTE、window、index、execution plan、transaction、locking、EF Core query 與 N+1；B 級是能協助定位問題的 parameter sniffing、covering index、snapshot、keyset pagination、migration deployment；C 級是知道用途、遇到專案需求再和 DBA 深入的 HA、partitioning、columnstore、advanced tuning。這樣可以先確保 correctness 和 production scalability。
+> 我把 SQL Server 能力分三層：A 級是日常 backend 必須會的資料型別、constraints、參數化、query semantics、NULL、JOIN、CTE、window、index、execution plan、transaction、locking、EF Core translation 與 N+1；B 級是能協助定位問題的 parameter sniffing、covering index、snapshot、keyset pagination、migration deployment；C 級是知道用途、遇到專案需求再和 DBA 深入的 HA、partitioning、columnstore、advanced tuning。這樣先確保 correctness 和 production scalability。
 
 ## 8. 小練習
 
