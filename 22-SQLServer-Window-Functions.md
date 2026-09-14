@@ -13,11 +13,28 @@ tags: [sql-server, mssql, window-functions, ranking]
 
 ## 1. 一句話理解
 
-Window function 在「保留每一筆明細 row」的同時，對它所屬的 partition 計算排名、前後值、累計或統計，不會像 `GROUP BY` 一樣把每組壓成一筆。
+Window function 在保留每一筆明細列的同時，對它所屬的 partition 計算排名、前後值、累計或統計，不會像 `GROUP BY` 一樣把每組壓成一筆。
 
 ## 2. 實際 SQL
 
 ### 排名
+
+固定輸入（`CreatedAt` 依時間遞增，`Id` 是唯一 tie-breaker）：
+
+```sql
+DECLARE @Orders TABLE
+(
+    Id int,
+    UserId int,
+    CreatedAt datetime2(0),
+    TotalAmount decimal(10, 2)
+);
+
+INSERT @Orders VALUES
+    (1, 1, '2026-09-01 09:00:00', 100.00),
+    (2, 1, '2026-09-02 09:00:00', 100.00),
+    (3, 1, '2026-09-03 09:00:00', 80.00);
+```
 
 ```sql
 SELECT
@@ -36,8 +53,16 @@ SELECT
         PARTITION BY o.UserId
         ORDER BY o.TotalAmount DESC
     ) AS DenseAmountRank
-FROM Orders o;
+    ,NTILE(2) OVER (
+        PARTITION BY o.UserId
+        ORDER BY o.TotalAmount DESC, o.Id DESC
+    ) AS AmountBucket
+FROM @Orders o;
 ```
+
+累計明確寫 `ROWS` 是為了按實體列累加。若只寫 `ORDER BY CreatedAt` 而省略 frame，預設是 `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`；同一個 `CreatedAt` 的 peer rows 會拿到相同累計值。`RANGE` 不能搭配數字偏移的 `PRECEDING`／`FOLLOWING`，需要固定列數時使用 `ROWS`。
+
+排名函數的 `ORDER BY` 必填，不能附加 `ROWS`／`RANGE`；三個排名函數與 `NTILE` 都回傳 `bigint`。
 
 ### 前後列與累計
 
@@ -60,25 +85,25 @@ SELECT
         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     ) AS RunningTotal,
     COUNT(*) OVER (PARTITION BY o.UserId) AS UserOrderCount
-FROM Orders o;
+FROM @Orders o;
 ```
 
 ## 3. 執行結果
 
-假設 Ada 的 orders 金額依時間是 `100、100、80`：
+以下結果以固定輸入與相同 SQL 核對；本機沒有 SQL Server，SQL Server 請重跑確認：
 
-| Amount | `ROW_NUMBER` by time | `RANK` by amount | `DENSE_RANK` by amount |
-| ---: | ---: | ---: | ---: |
-| 100 | 1 | 1 | 1 |
-| 100 | 2 | 1 | 1 |
-| 80 | 3 | 3 | 2 |
+| Id | Amount | `ROW_NUMBER` by time | `RANK` by amount | `DENSE_RANK` by amount |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 100 | 3 | 1 | 1 |
+| 2 | 100 | 2 | 1 | 1 |
+| 3 | 80 | 1 | 3 | 2 |
 
-- `ROW_NUMBER()` 每列都給唯一序號，tie 也會分開；要有 deterministic 結果，排序補上唯一 key。
+- `ROW_NUMBER()` 每列都給唯一序號，同值也會分開；排序要補上唯一 key。
 - `RANK()` 相同值同名次，後面名次會跳號：1、1、3。
 - `DENSE_RANK()` 相同值同名次，但不跳號：1、1、2。
 - `PARTITION BY UserId` 表示每個 user 重新開始排名；沒有 partition 就是全表一個 window。
 
-## 4. SQL Server 背後大概做什麼
+## 4. 常用查詢樣板與執行計畫
 
 ### 每個使用者最新一筆
 
@@ -98,7 +123,13 @@ FROM RankedOrders
 WHERE rn = 1;
 ```
 
-window function 的結果通常不能直接在同一層 `WHERE` 使用，所以用 CTE / derived table 先計算，再在外層篩選。
+視窗函數只能出現在 `SELECT` 與 `ORDER BY`，寫在同一層 `WHERE` 會得到：
+
+```text
+Msg 4108: Windowed functions can only appear in the SELECT or ORDER BY clauses.
+```
+
+所以要用 CTE／derived table 先計算，再在外層篩選。
 
 ### 每組排名前三名
 
@@ -132,24 +163,32 @@ SELECT
 FROM BalanceHistory;
 ```
 
-`LAG` 沒有前一筆時會回 NULL；可以用 `COALESCE` 或保留 NULL 表達「不存在前一筆」。
+`LAG(expression, offset, default)` 的 `offset` 預設是 1、`default` 預設是 NULL；例如 `LAG(Balance, 1, 0)` 可以直接把第一筆的差值基準設成 0。SQL Server 2022+ 還支援 `IGNORE NULLS`／`RESPECT NULLS`，預設是 `RESPECT NULLS`。
 
 ## 5. 與 C# / EF Core 的關聯
 
-LINQ 的 `GroupBy` 不等於 SQL window function：
+LINQ 的 `GroupBy` 改變結果形狀；SQL window function 保留每筆列並附加分析欄位。EF Core 6+ 對特定的 `GroupBy` + `OrderBy` + `First`／`Take` 形狀能翻成 `ROW_NUMBER()`，但沒有直接對應 `LAG`、`LEAD`、`RANK` 或 `SUM() OVER` 的 LINQ API。
 
-- `GroupBy` 常把資料聚成 groups / aggregate，改變 result shape。
-- window function 保留每筆 entity / row，再附加分析欄位。
+```csharp
+var latestOrders = db.Orders
+    .GroupBy(order => order.UserId)
+    .Select(group => group
+        .OrderByDescending(order => order.CreatedAt)
+        .ThenByDescending(order => order.Id)
+        .First());
+Console.WriteLine(latestOrders.ToQueryString());
+```
 
-EF Core 對 window function 的 LINQ 翻譯能力依版本與 provider 而異。對複雜 top-N-per-group，先理解目標 SQL，再確認 generated SQL；必要時用明確 projection、view 或 parameterized raw SQL，不要在 memory `ToList()` 後才排序整張大表。
+實際產生的 SQL 會包含 `ROW_NUMBER() OVER(PARTITION BY ... ORDER BY ...)` 與外層 `WHERE [row] <= 1`。若改寫成不受支援的 `SelectMany(group => group.OrderByDescending(...).Take(3))`，EF Core 會在執行時丟 `InvalidOperationException`。需要 `LAG`／`LEAD`／`RANK`／`SUM() OVER` 時，使用參數化 raw SQL、view 或 keyless entity；不要先 `ToList()` 把大型資料集拉到記憶體再排序。
 
 ## 6. 常見誤區
 
-- `ROW_NUMBER()` 沒有 deterministic tie-breaker 時，並列 row 的順序可能不穩定。
+- `ROW_NUMBER()` 沒有唯一的排序鍵時，同值列的順序不保證固定。
 - `RANK` 與 `DENSE_RANK` 的差別是 tie 後是否跳號。
-- `PARTITION BY` 不是 physical partition，也不是 `GROUP BY`；它是 window 的分析分組。
-- window function 不是免費排序；`ORDER BY OVER` 可能需要 sort，資料量大時要看 execution plan。
-- top-N per group 不要在 C# foreach 對每個 group 查一次，會導向 N+1。
+- `PARTITION BY` 只是視窗的分組範圍，與資料表分割和 `GROUP BY` 不同。
+- `ORDER BY` 的索引 key 順序應先放 `PARTITION BY` 欄位，再放 `ORDER BY` 欄位；是否需要 Sort 要看 execution plan。
+- 每組前 N 筆不要在 C# 迴圈裡對每組各查一次，那是 N+1。
+- `ROW_NUMBER`、`RANK`、`DENSE_RANK`、`NTILE` 回傳 `bigint`；需要映射到 C# 時使用 `long`。
 
 ## 7. 面試回答
 
