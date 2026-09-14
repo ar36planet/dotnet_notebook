@@ -53,9 +53,9 @@ Browser
 | `ModelState` | `BindingResult` | 保存 binding 與 validation 結果 |
 | Data Annotations | Bean Validation annotations | `[Required]`、`[Range]` 對應常見欄位規則 |
 | `Tag Helpers` | Thymeleaf attributes | 在 HTML 屬性上加入 server-side URL、form、validation 行為 |
-| `TempData` | redirect attributes 的常見用途 | 暫存跨 redirect 要顯示的一次性訊息 |
+| `TempData` | `RedirectAttributes.addFlashAttribute` | 暫存跨 redirect 要顯示的一次性訊息 |
 | `Partial View` | fragment | 重用一段沒有獨立 request flow 的 HTML |
-| `View Component` | fragment + server-side component | 自己執行 server-side code 再產生一段 HTML |
+| `View Component` | 沒有直接對應；最接近是 template fragment 搭配 server-side service | 自己執行 server-side code 再產生一段 HTML |
 
 ASP.NET Core MVC 使用 `Program.cs` 組合 host、DI、middleware 和 endpoint；不需要 `Startup.cs` 才能建立 MVC app。現代專案通常會把 controller 保持在 UI 邊界，把商業規則放進 service。
 
@@ -176,6 +176,8 @@ app.Run();
 
 `AddControllers()` 只註冊 controller 相關服務，適合不需要 Razor View 的 API。`AddControllersWithViews()` 另外啟用 MVC views、Razor view engine 和相關功能。少了 `MapControllerRoute()`，conventional-routed MVC action 沒有被接到 endpoint。
 
+.NET 9 起 MVC 範本改用 `app.MapStaticAssets()`（支援壓縮與指紋）；`UseStaticFiles()` 仍可使用，兩者不是同一個 API。
+
 ### Conventional Routing
 
 ```csharp
@@ -206,7 +208,13 @@ public class ProductController : Controller
 }
 ```
 
-`{id?}` 的 `?` 代表 optional。若 action 的 `id` 是非 nullable `int`，缺少值時要注意 default value 與 validation；更清楚的寫法可以使用 `int?`，或直接讓 route constraint 排除不合法 URL。
+`{id?}` 的 `?` 代表 optional。缺少值時，非 nullable `int id` 會得到 `0`，`ModelState.IsValid` 仍然是 `true`；要把缺值視為錯誤，可使用 `int?` 自己判斷、加 `[BindRequired]`，或用 route constraint 排除不合法 URL。
+
+實際結果：
+
+```text
+GET /Product/Details → id=0, ModelState.IsValid=True
+```
 
 ### Attribute Routing
 
@@ -229,13 +237,13 @@ public class ProductController : Controller
 }
 ```
 
-要把 attribute-routed controller 接進 pipeline，加入：
+已經有 `MapControllerRoute()` 的 MVC 專案不必再加 `MapControllers()`；`MapControllerRoute()` 同時對應 conventional 與 attribute-routed controller。只有純 attribute routing（例如純 API 專案）才使用 `MapControllers()`：
 
 ```csharp
 app.MapControllers();
 ```
 
-conventional routing 和 attribute routing 可以共存，但要看清楚每個 action 使用哪一種 route。實務上，同一個 MVC app 常用 conventional route 給一般頁面，再用 attribute route 給特定頁面或 API。
+conventional routing 和 attribute routing 可以共存，但 controller 或 action 一旦放了 `[Route]`／`[HttpGet("...")]`，就只能由 attribute route 到達；controller 上有 route attribute 時，該 controller 的所有 action 都變成 attribute-routed。第 216 行的範例 URL 是 `/products`、`/products/10`、`/products/create`，不再是 `/Product/Details/10`。
 
 ### HTTP method attributes
 
@@ -256,7 +264,7 @@ conventional routing 和 attribute routing 可以共存，但要看清楚每個 
 | 型別或 helper | MVC 用途 |
 | --- | --- |
 | `IActionResult` | 一個 action 可能回傳 `View`、`NotFound`、`RedirectToAction` 等不同結果 |
-| `ActionResult` | `IActionResult` 的抽象基底；直接寫它的機會較少 |
+| `ActionResult` | 實作 `IActionResult` 的抽象類別；`ViewResult`、`RedirectToActionResult`、`ObjectResult` 等具體 result 都繼承它 |
 | `ActionResult<T>` | API 需要在 `T`、`NotFound`、`BadRequest` 間切換時常用，MVC view action 不必勉強使用 |
 | `ViewResult` | 明確表示要 render Razor View，例如 `return View(model)` |
 | `RedirectToActionResult` | `RedirectToAction` 產生的 redirect result |
@@ -285,6 +293,8 @@ public class ProductController : Controller
 ```
 
 `Controller` 繼承自 `ControllerBase`，再加上 `View()`、`ViewData`、`ViewBag`、`TempData`、`PartialView()` 等 view-oriented helpers。
+
+`ActionResult<IReadOnlyList<T>>` 使用介面型別時，請透過 `Ok(list)` 回傳；C# 不支援介面型別的 implicit conversion，不能直接 `return list;`。
 
 Web API 常見寫法則是：
 
@@ -378,16 +388,22 @@ Razor View 是 `.cshtml` 檔案，HTML 是主要內容，`@` 讓 Razor 進入 C#
 @model ProductViewModel
 
 <h1>@Model.Name</h1>
-<p>@Model.Price.ToString("C2")</p>
+<p>@Model.Price.ToString("C2", System.Globalization.CultureInfo.GetCultureInfo("zh-TW"))</p>
 ```
 
-條件與迴圈：
+條件：
 
 ```cshtml
 @if (Model.Price >= 1000)
 {
     <span>高單價商品</span>
 }
+```
+
+清單 view 使用集合型別：
+
+```cshtml
+@model IReadOnlyList<ProductViewModel>
 
 @foreach (var product in Model)
 {
@@ -424,6 +440,15 @@ Views/
 └── Home/
     └── Index.cshtml
 ```
+
+`Views/_ViewImports.cshtml` 會套用到該目錄下的 views，常見內容是：
+
+```cshtml
+@using ProductMvc.Models
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+```
+
+沒有 `@addTagHelper` 時，`asp-for`、`asp-action`、`<partial>` 等標記不會被 Tag Helper 處理。
 
 `_ViewStart.cshtml` 可以設定所有 view 的預設 layout：
 
@@ -474,15 +499,16 @@ Partial View 是沒有獨立 action flow 的可重用 `.cshtml` 片段：
 public sealed class CartSummaryViewComponent(ICartService service)
     : ViewComponent
 {
-    public async Task<IViewComponentResult> InvokeAsync(
-        CancellationToken cancellationToken)
-        => View(await service.GetSummaryAsync(cancellationToken));
+    public async Task<IViewComponentResult> InvokeAsync()
+        => View(await service.GetSummaryAsync(HttpContext.RequestAborted));
 }
 ```
 
 ```cshtml
 @await Component.InvokeAsync("CartSummary")
 ```
+
+View Component 的參數只來自 `Component.InvokeAsync` 傳入的匿名物件，不經過 model binding，也不會自動取得 request 的 `CancellationToken`；需要取消時直接使用 `HttpContext.RequestAborted`。
 
 Partial View 主要是 markup reuse；View Component 有自己的 class、參數和 server-side logic。兩者都不是拿來取代 Layout 的。
 
@@ -508,13 +534,12 @@ Tag Helpers 讓 server-side code 參與既有 HTML element 的產生。以下 Ra
 <form asp-action="Create" method="post">
 ```
 
-會產生 action URL，並且在 MVC form 的 anti-forgery 設定下加入類似下面的 hidden input：
+會產生 action URL，並且在 MVC form 的 anti-forgery 設定下於 `</form>` 前加入 hidden input。token 每次不同，實際輸出可看到 `CfDJ8...` 開頭的 Data Protection 字串：
 
 ```html
 <form action="/Product/Create" method="post">
-    <input name="__RequestVerificationToken"
-           type="hidden"
-           value="由伺服器產生的 token" />
+    <input name="__RequestVerificationToken" type="hidden"
+           value="CfDJ8DA8YyZjWb1N...（每次 request 不同，這裡截斷）" />
 </form>
 ```
 
@@ -523,16 +548,11 @@ Tag Helpers 讓 server-side code 參與既有 HTML element 的產生。以下 Ra
 <span asp-validation-for="Name"></span>
 ```
 
-假設 `Name` 有 `[Required]`，輸出會包含對應的 `id`、`name`、`value` 和 client-side validation metadata：
+假設 `Name` 有 `[Required(ErrorMessage = "請輸入商品名稱。")]`，實際輸出包含 `id`、`name`、空的 `value` 和 client-side validation metadata：
 
 ```html
-<input id="Name"
-       name="Name"
-       data-val="true"
-       data-val-required="請輸入商品名稱。"
-       type="text" />
-<span data-valmsg-for="Name"
-      data-valmsg-replace="true"></span>
+<input type="text" data-val="true" data-val-required="&#x8ACB;&#x8F38;&#x5165;&#x5546;&#x54C1;&#x540D;&#x7A31;&#x3002;" id="Name" name="Name" value="" />
+<span class="field-validation-valid" data-valmsg-for="Name" data-valmsg-replace="true"></span>
 ```
 
 這段 markup 不是瀏覽器認得的 `asp-for`；Tag Helper 在 server render 階段先把它轉成一般 HTML。`asp-route-id` 也不是字串拼接：它會交給 URL generation，route pattern 變更時，view 不必手動修改 `/Product/Details/10`。
@@ -701,7 +721,7 @@ MVC form 常靠 cookie 驗證使用者。瀏覽器會自動把 cookie 附在 req
 5. 如果 server 只信 cookie，商品可能被刪除。
 ```
 
-Anti-Forgery Token 使用 synchronizer token pattern：server render form 時放一個不可預測的 hidden token，POST 時檢查 form token 和 cookie / server side data 是否匹配。
+Anti-Forgery Token 使用 synchronizer token pattern：server render form 時放一個不可預測的 hidden request token，POST 時比對它與 cookie 中的 cookie token。這是無狀態配對，不需要 server-side session data。
 
 ```cshtml
 <form asp-action="Create" method="post">
@@ -722,6 +742,13 @@ public IActionResult Create(ProductCreateViewModel model)
 }
 ```
 
+MVC controller 不會像 Razor Pages 一樣自動套用 Anti-Forgery。大型 MVC app 可在全域加入 `AutoValidateAntiforgeryToken`，它只驗證 POST、PUT、PATCH、DELETE 等不安全方法，GET／HEAD／OPTIONS／TRACE 不要求 token：
+
+```csharp
+builder.Services.AddControllersWithViews(options =>
+    options.Filters.Add(new AutoValidateAntiforgeryTokenAttribute()));
+```
+
 如果攻擊者只知道 URL，卻拿不到同源頁面產生的 token，POST 就不能通過檢查。Anti-Forgery 不是輸入驗證，也不是 authorization；它解決的是「瀏覽器自動帶 cookie 的跨站請求」問題。使用 bearer token 且 API 不使用 cookie 驗證時，CSRF 風險模型不同，但仍要依 authentication、CORS 和瀏覽器使用方式做安全判斷。
 
 ### Cookie、Session、TempData、ViewData、ViewBag
@@ -731,7 +758,7 @@ public IActionResult Create(ProductCreateViewModel model)
 | `Model` | 目前 action → 目前 View | 這個頁面的主要資料，優先使用 |
 | `ViewData` | 目前 request 的 dictionary | 少量 view metadata，例如 title；key 是字串 |
 | `ViewBag` | `ViewData` 的 dynamic wrapper | 舊專案常見；沒有 compile-time property 檢查 |
-| `TempData` | 通常保留到下一個 request，讀取後消費 | POST redirect 後顯示一次性的成功或錯誤訊息 |
+| `TempData` | 預設放在加密 cookie，保留到下一個 request；讀取後消費，可用 `Peek`／`Keep` 保留 | POST redirect 後顯示一次性的成功或錯誤訊息；內容應小於約 4 KB |
 | Cookie | 瀏覽器保存、每次符合條件的 request 自動送回 | 小型 client preference、非敏感識別資料；不要直接放秘密 |
 | Session | server-side / distributed store，cookie 通常只帶 session id | 跨 request 的暫時購物車或 wizard state |
 
@@ -895,7 +922,7 @@ public sealed class ProductsApiController(IProductService service)
 
 | 優先級 | 主題 | 先知道什麼 |
 | --- | --- | --- |
-| B | Filters | 在 action 前後集中做 authorization、logging、exception 或 resource 工作；不要把所有共用邏輯塞進 controller |
+| B | Filters | action 選定後依序經過 Authorization → Resource → model binding → Action → Exception → Result；把共用工作放在對應 filter，不要塞進 controller |
 | B | Areas | 以 `Areas/Admin/Controllers`、`Areas/Admin/Views` 分隔後台等大型功能區 |
 | B | Authorization | Authentication 確認你是誰；authorization 判斷你能不能做這件事，MVC 頁面常配 cookie auth 和 policy |
 | B | View Component | 共用 UI 片段需要自己執行 server-side code 時使用 |
@@ -987,7 +1014,7 @@ public async Task<IActionResult> Create(
 @foreach (var product in Model)
 {
     <span>@product.Name</span>
-    <span>@product.Price.ToString("C2")</span>
+    <span>@product.Price.ToString("C2", System.Globalization.CultureInfo.GetCultureInfo("zh-TW"))</span>
     <a asp-action="Details" asp-route-id="@product.Id">詳細</a>
     <a asp-action="Edit" asp-route-id="@product.Id">編輯</a>
     <a asp-action="Delete" asp-route-id="@product.Id">刪除</a>
