@@ -17,7 +17,7 @@ tags: [csharp, generics, collections, api-design]
 
 ## 2. Java 對照
 
-這章可以直接從 C# 學，不需要先懂 Java collection。這張表只供查名稱：
+這張表只供查名稱：
 
 | 用途 | C# | Java 大致對應 |
 | --- | --- | --- |
@@ -36,11 +36,11 @@ C# 的 `List<T>` 是可以用 `new` 建立的類別。Java 的 `List<T>` 是介�
 以下範例用 .NET 10 主控台專案執行；把整段放進 `Program.cs`。後面延續此範例的程式碼，放在最後的 `record` 宣告之前。
 
 ```csharp
-var orders = new List<Order>
-{
+List<Order> orders =
+[
     new Order(1001, 800m),
     new Order(1002, 1200m)
-};
+];
 
 orders.Add(new Order(1003, 500m));
 Console.WriteLine($"筆數：{orders.Count}");
@@ -63,6 +63,8 @@ public sealed record Order(int Id, decimal Amount);
 ```
 
 `Order` 表示一筆訂單，有編號 `Id` 和金額 `Amount`；`800m` 的 `m` 表示 `decimal`。`orders` 則存多筆 `Order`。
+
+C# 12 起，collection expression 可以把初始化寫成 `List<Order> orders = [new(1001, 800m), new(1002, 1200m)];`。左側必須提供目標型別，不能寫成沒有目標型別的 `var orders = [...]`。
 
 - `Add(...)`：把一筆訂單加到清單最後。
 - `Count`：目前有幾筆，這是屬性，不加括號。
@@ -98,7 +100,7 @@ if (byId.TryGetValue(1002, out Order? found))
 
 ### 同一份清單，可以透過不同介面使用
 
-如果取得訂單的方法回傳 `List<Order>`，呼叫端就能呼叫 `Clear()`，把拿到的清單清空。若只需要顯示結果，可以把回傳型別寫成 `IReadOnlyList<Order>`，讓這個介面只提供讀取操作。
+如果取得訂單的方法回傳 `List<Order>`，呼叫端就能呼叫 `Clear()`，把拿到的清單清空。若只需要顯示結果，可以把回傳型別寫成 `IReadOnlyList<Order>`，這個介面只有讀取操作。
 
 ```csharp
 IReadOnlyList<Order> result = orders;
@@ -112,7 +114,27 @@ Console.WriteLine($"唯讀介面看到的筆數：{result.Count}");
 唯讀介面看到的筆數：4
 ```
 
-右側的 `orders` 仍是原來的 `List<Order>`；左側的型別決定透過 `result` 可以用哪些操作。`result` 能讀 `Count`、用 `[0]` 取資料，卻沒有 `Add` 或 `Clear`。這次指定沒有複製清單，所以透過 `orders` 新增的訂單，`result` 也看得到。
+右側的 `orders` 仍是原來的 `List<Order>`；左側的型別決定透過 `result` 可以用哪些操作。`result` 能讀 `Count`、用 `[0]` 取資料，卻沒有 `Add` 或 `Clear`。這次指派沒有複製清單，所以透過 `orders` 新增的訂單，`result` 也看得到。
+
+介面只限制透過該靜態型別可呼叫的操作；`result` 實際上仍是同一個 `List<Order>`，呼叫端可以用 `((List<Order>)result).Clear()` 轉型後修改它。若要連這種轉型也擋住，回傳 `orders.AsReadOnly()` 產生的 `ReadOnlyCollection<Order>` 包裝：
+
+```csharp
+IReadOnlyList<Order> protectedResult = orders.AsReadOnly();
+try
+{
+    ((List<Order>)protectedResult).Clear();
+}
+catch (InvalidCastException exception)
+{
+    Console.WriteLine($"{exception.GetType().FullName}: {exception.Message}");
+}
+```
+
+實際輸出：
+
+```text
+System.InvalidCastException: Unable to cast object of type 'System.Collections.ObjectModel.ReadOnlyCollection`1[Order]' to type 'System.Collections.Generic.List`1[Order]'.
+```
 
 | 型別 | 可以使用的主要操作 |
 | --- | --- |
@@ -157,11 +179,11 @@ Console.WriteLine($"最近 {recent.Count} 筆，第一筆是 {recent[0].Id}");
 
 static IReadOnlyList<Order> GetRecentOrders()
 {
-    var orders = new List<Order>
-    {
+    List<Order> orders =
+    [
         new Order(1003, 500m),
         new Order(1002, 1200m)
-    };
+    ];
     return orders;
 }
 ```
@@ -172,7 +194,7 @@ static IReadOnlyList<Order> GetRecentOrders()
 最近 2 筆，第一筆是 1003
 ```
 
-方法內用 `List<Order>` 建立資料，方法外透過 `IReadOnlyList<Order>` 讀取。這裡資料已經備妥，是因為方法建立了清單；光看介面名稱，不能保證方法內怎麼取得資料。
+方法內用 `List<Order>` 建立資料，方法外透過 `IReadOnlyList<Order>` 讀取。這裡資料已經備妥，是因為方法內建立了清單。
 
 這個範例固定有兩筆。實際查詢若可能回傳空清單，使用 `[0]` 前要先確認 `Count > 0`。
 
@@ -181,7 +203,7 @@ static IReadOnlyList<Order> GetRecentOrders()
 下面是獨立範例。`Where` 是 LINQ 的篩選方法，`amount => amount >= 1000m` 表示保留金額至少 1000 元的項目；完整語法留到 [[04-LINQ]]。
 
 ```csharp
-var amounts = new List<decimal> { 800m, 1200m };
+List<decimal> amounts = [800m, 1200m];
 IEnumerable<decimal> largeAmounts = amounts.Where(amount => amount >= 1000m);
 
 amounts.Add(1500m);
@@ -203,11 +225,11 @@ Console.WriteLine(string.Join(", ", largeAmounts));
 
 第一行包含後來新增的 1500：`Where` 在這裡先保存篩選條件，直到 `string.Join` 逐筆讀取時才篩選。`ToList()` 會當場讀取結果，存成另一份清單，因此 `snapshot` 沒有後來新增的 2000；再次讀取 `largeAmounts` 則會重新篩選。
 
-是否延後執行，要看資料來源與操作。資料庫查詢和執行時機放在 [[05-IEnumerable與IQueryable]]。
+資料庫查詢和執行時機放在 [[05-IEnumerable與IQueryable]]。
 
 ## 5. 常見誤解
 
-- **唯讀介面等於資料永遠不變。** 它限制透過該介面能做的操作，底層清單仍可能被其他程式改動；也不保證每筆物件的屬性不能改。
+- **唯讀介面等於資料永遠不變。** 它限制透過該介面能做的操作；若底層仍是 `List<Order>`，呼叫端甚至可以轉型回去修改。真的要防止清單本身被修改，使用 `AsReadOnly()` 包裝；這仍不保證每筆物件的屬性不能改。
 - **`ToList()` 會複製所有物件。** 它建立新的清單；元素若是參考型別，新舊清單仍可指向同一個物件。
 - **用了介面就不能用 `List<T>`。** 方法內仍可用清單；介面決定呼叫端可用的操作。需要讓呼叫端直接增刪、排序時，回傳 `List<T>` 也合理。
 
