@@ -26,7 +26,7 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT TOP (@PageSize) Id, Name
+    SELECT TOP (@PageSize) Id, DisplayName
     FROM dbo.Users
     WHERE IsActive = 1
     ORDER BY CreatedAt DESC, Id DESC;
@@ -55,6 +55,7 @@ RETURN
     WHERE UserId = @UserId
 );
 
+DECLARE @UserId int = 42;
 SELECT *
 FROM dbo.GetOrdersForUser(@UserId);
 ```
@@ -66,6 +67,7 @@ AFTER INSERT, UPDATE
 AS
 BEGIN
     SET NOCOUNT ON;
+    IF (ROWCOUNT_BIG() = 0) RETURN;
     INSERT INTO OrderAudit(OrderId, ChangedAt)
     SELECT Id, SYSUTCDATETIME()
     FROM inserted;
@@ -107,8 +109,8 @@ SELECT * FROM Recent;
 
 | 工具 | Scope / lifetime | Statistics / index 直覺 | 適合 |
 | --- | --- | --- | --- |
-| `#TempTable` | current session；transaction / scope 規則需注意 | 可建立 index，通常有 statistics，適合較大量中間結果與多次 reuse |
-| `@TableVariable` | batch / procedure scope | 現代版本有改進，但通常不應假設和 temp table 一樣；適合小量、簡單結果 |
+| `#TempTable` | current session；stored procedure 結束時自動 drop，巢狀 procedure 看得到，呼叫者看不到 | 可建立 index，有 statistics | 較大量中間結果與多次 reuse |
+| `@TableVariable` | batch / procedure scope；transaction rollback 不會回滾其內容 | 沒有 column statistics；2019 compat 150+ 用實際列數 deferred compilation | 小量、短 scope 結果 |
 | CTE | 緊接一個 statement | 不保存、不跨 statement、不是自動 materialize | 單一 query 的可讀性、recursive query、window 分層 |
 
 ### OFFSET / FETCH
@@ -122,6 +124,8 @@ FETCH NEXT @PageSize ROWS ONLY;
 ```
 
 page 1 只需跳過少量 rows；page 10000 仍可能需要找到並丟棄大量前置 rows。即使有 index，也可能因深 offset 增加 I/O 與 sort / lookup 成本。
+
+`OFFSET` 必須接在 `ORDER BY` 後，`FETCH` 必須搭配 `OFFSET`；SQL Server 2012+ 支援，且同一 query expression 不能同時使用 `TOP`。翻頁排序要包含唯一 key，否則結果順序不穩定。
 
 ### Keyset pagination
 
@@ -145,6 +149,16 @@ INCLUDE(Name);
 
 Keyset 的前提是排序 key 穩定且 cursor 能表達嚴格順序；`CreatedAt` 可能相同，所以要加 unique tie-breaker，如 `Id`。
 
+EF Core keyset query 的 `ToQueryString()`（固定 `pageSize = 20`、cursor `CreatedAt = 2026-01-01`、`Id = 100`）會包含：
+
+```sql
+SELECT TOP(@p) [u].[Id], [u].[CreatedAt], [u].[Name]
+FROM [Users] AS [u]
+WHERE [u].[CreatedAt] < @cursor_CreatedAt
+   OR ([u].[CreatedAt] = @cursor_CreatedAt AND [u].[Id] < @cursor_Id)
+ORDER BY [u].[CreatedAt] DESC, [u].[Id] DESC
+```
+
 ## 4. SQL Server 背後大概做什麼
 
 ### DB layer vs application layer
@@ -152,7 +166,7 @@ Keyset 的前提是排序 key 穩定且 cursor 能表達嚴格順序；`CreatedA
 | Object | 回傳 / 觸發方式 | 常見用途 | 需要小心 |
 | --- | --- | --- | --- |
 | Stored procedure | `EXEC`，可回多個 result sets / output parameters | command、交易內多步驟操作、受控資料存取 | contract、版本、測試與 deployment |
-| Scalar function | 每次回一個 scalar value | 純計算、可組合 expression 的小型邏輯 | row-by-row execution、translation / cost、不可任意做 side effect |
+| Scalar function | 每次回一個 scalar value | 純計算、可組合 expression 的小型邏輯 | SQL Server 2019 compat 150+ 符合條件者可 scalar UDF inlining；更早版本逐筆呼叫、不計成本且禁止 query parallelism |
 | Table-valued function | 回傳 table-shaped row set，可放在 FROM | reusable parameterized read query | inline TVF 與 multi-statement TVF 的 plan / cardinality 差異 |
 | Trigger | DML / DDL event 後自動執行 | 強制 audit、跨 row invariant 的 DB-side reaction | 隱藏副作用、transaction 變長、multi-row handling、debugging |
 
@@ -168,7 +182,7 @@ Keyset 的前提是排序 key 穩定且 cursor 能表達嚴格順序；`CreatedA
 - 與 transport / HTTP / UI 強耦合的邏輯。
 - 不應被藏在 trigger 中的跨表副作用。
 
-沒有「stored procedure 永遠快」或「business logic 永遠不能進 DB」的規則；要從維護性、權限、transaction、reuse、deploy 與效能分析決定。
+預設把複雜 domain orchestration 留在 application layer；只有需要和寫入同一 transaction、或 DBA 必須審查的 set-based／權限邊界，才把邏輯放進 DB。最後仍要用維護性、權限、transaction、重用、部署與效能分析驗證。
 
 ### Pagination 的一致性
 
@@ -179,7 +193,7 @@ Keyset 的前提是排序 key 穩定且 cursor 能表達嚴格順序；`CreatedA
 EF Core keyset pagination：
 
 ```csharp
-var query = db.Users
+IQueryable<User> query = db.Users
     .OrderByDescending(x => x.CreatedAt)
     .ThenByDescending(x => x.Id);
 
@@ -196,7 +210,13 @@ var page = await query
     .ToListAsync(cancellationToken);
 ```
 
-`IQueryable` 要保持到 `Take` / projection 之後；太早 `ToList()` 會把 pagination 搬到 memory。Stored procedure 可用 `FromSql` / ADO.NET，但要使用 parameterized API，不要串接 user input。
+`IQueryable` 要保持到 `Take`／投影之後；太早 `ToList()` 會把 pagination 搬到記憶體。Stored procedure 可用 `FromSql`／ADO.NET，但要使用參數化 API，不要串接 user input。`FromSql` 只能直接接在 `DbSet` 上；SQL Server 不允許對 `EXEC` 再接 `Where`／`OrderBy`，否則會丟：
+
+```text
+InvalidOperationException: 'FromSql' or 'SqlQuery' was called with non-composable SQL and with a query composing over it. Consider calling 'AsEnumerable' after the method to perform the composition on the client side.
+```
+
+`FromSql` 要回傳 entity 的全部欄位；非 entity 結果可用 EF Core 7+ 的 `Database.SqlQuery<T>`，需要明確型別／長度時傳 `SqlParameter`。SQL Server 2019 compat 150+ 可查 `sys.sql_modules.is_inlineable` 判斷 scalar UDF 是否可 inlining。
 
 ## 6. 常見誤區
 
