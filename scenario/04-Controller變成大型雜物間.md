@@ -133,3 +133,7 @@ OrderController 現在只留下：
 | 14 WebApplicationFactory | 替換測試服務、HTTP 邊界 | 留給下一階段測試工單 |
 
 完整回讀仍放在原教材：ValidateScopes、ValidateOnBuild、IServiceScopeFactory、Options、keyed services，以及 DI 與 Service Locator 的差異。
+
+---
+
+[[scenario/03-客服重新整理後訂單多一筆|← 上一章：S03 客服重新整理後訂單多一筆]] · [[scenario/index|情境教材目錄]] · [[scenario/05-運費服務變慢整個頁面timeout|下一章：S05 運費服務變慢，整個頁面 timeout →]]

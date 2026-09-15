@@ -175,3 +175,7 @@ ASP.NET Core 的 request body、action parameter 和 response DTO 也會經過�
 | 13A ASP.NET Core 架構 | Controller、Service、設定與 exception handling | 接回前一張工單 |
 
 完整回讀仍放在原教材：ValueTask、HttpClient resilience handler、ResponseHeadersRead 的 timeout 邊界、Newtonsoft.Json 與 System.Text.Json 的完整差異，以及 JSON options 和 source generation。
+
+---
+
+[[scenario/04-Controller變成大型雜物間|← 上一章：S04 Controller 變成大型雜物間]] · [[scenario/index|回到情境教材目錄]] · 下一章：S06 尚未建立

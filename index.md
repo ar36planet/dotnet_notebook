@@ -10,6 +10,10 @@ title: 現代 C# / .NET / ASP.NET Core 學習筆記
 
 > 先建立 C# 型別模型 → 理解 .NET 慣用 API → 放進 ASP.NET Core 與 SQL Server 實務情境
 
+## 情境式／故事任務導向教材
+
+- [[scenario/index|進入情境教材目錄]]
+
 ## C# / .NET / ASP.NET Core
 
 - [[01-型別與值語意]]
