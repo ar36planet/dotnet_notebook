@@ -7,62 +7,47 @@ tags: [scenario, async, cancellation, httpclient, json, aspnet-core]
 
 ## 工單 #1881
 
-OrderService 已經從 Controller 拆出來了。下一個需求是建立訂單前先取得運費。
+S04 的 OrderService 已經從 Controller 拆出來了。建立訂單前還要先取得運費。
 
-運費服務的 endpoint 平常很快，偶爾會卡住。客服回報的畫面是：
+運費服務平常會回應，偶爾卻會等很久。客服描述的不是錯誤訊息，而是：
 
 ```text
 按下建立訂單
     ↓
-頁面轉圈
+頁面一直轉
     ↓
-過一段時間才看到錯誤
+最後整個 request timeout
 ```
 
-你看目前的呼叫方式，發現 action 會同步等待外部 HTTP 結果。外部服務還沒回來時，這個 request 就一直占著處理工作。
+你先看 request timeline，發現本機沒有忙著算東西，大部分時間都在等外部 HTTP response。
 
-先把這次事故拆開：
+目前有三個方向：
 
-- 外部服務慢，不代表本機 CPU 忙。
-- 等待 HTTP response 時，不需要讓 request thread 一直卡住。
-- 使用者關掉頁面後，原本的工作不一定還值得繼續。
-- 服務回傳 404、409、503，業務意義不一樣。
+```text
+A. 把同步呼叫包進 Task.Run。
+B. 把 HTTP timeout 調得更長，讓它多等一下。
+C. 讓 HTTP 呼叫從 Controller 到 client 都是非同步，並且傳遞 request cancellation。
+```
 
-## 先處理等待方式
+A 會把同步等待搬到 thread pool，沒有讓外部服務變快；B 只能延後使用者看到錯誤的時間。這張工單選 C，但選完還要處理 client 的生命週期、狀態碼和 response body。
+
+## 先把等待方式改對
 
 `Task<T>` 表示一個尚未完成或已完成的非同步操作，以及它完成後會產生的結果。它不是一條 thread。
 
-`await` 等待 I/O 時，如果工作尚未完成，方法可以把控制權交還給呼叫端；I/O 完成後，再從原本的位置接著執行。這和用 `.Result` 或 `.Wait()` 把目前執行緒堵住是不同的事情。
+`await` 等待 I/O 時，如果工作尚未完成，方法可以把控制權交還給呼叫端；I/O 完成後，再從原本的位置接著執行。
 
-所以這裡不是把所有工作都丟進 `Task.Run`。HTTP、資料庫和檔案 API 本來就提供非同步版本，直接一路 await 即可。
+`.Result` 和 `.Wait()` 則是同步等待。它們會讓目前執行緒停在那裡，不能因為最後仍然拿到相同結果，就把兩種等待方式視為一樣。
 
-## 第二個問題：每次呼叫都建立 HttpClient
+這裡也不需要把所有工作丟進 `Task.Run`。HTTP、資料庫和檔案 API 本來就有非同步版本，直接一路 await 才能讓每一層的取消和例外保持清楚。
 
-第一版為了快速完成，OrderService 每次執行都自己建立一個 HttpClient。
+## Request 已經消失了，工作還在跑
 
-短時間測試通常看不出問題。高頻呼叫時，每個 client 可能各自管理 connection pool；連線反覆建立和釋放，會讓 socket、port、DNS 更新與 handler 生命週期變得難以控制。
+客服按下送出後關閉瀏覽器，這個 HTTP request 已經沒有使用者在等結果。
 
-這裡改用 typed client，把一個外部 API 的設定和操作集中在一個 class：
+ASP.NET Core 會透過 `RequestAborted` 發出 cancellation signal。它不是強制殺掉 thread；每一層要把 token 傳給支援 cancellation 的 API，讓工作在安全檢查點停止。
 
-```text
-OrderService
-    ↓
-FreightRateClient
-    ↓
-HttpClientFactory 管理的 HttpClient
-    ↓
-運費服務
-```
-
-Service 不需要知道 base address 怎麼設定，也不需要自己決定 handler 何時替換。
-
-## 第三個問題：request 已經取消了，工作還在跑
-
-客服按下送出後關閉瀏覽器，HTTP request 的 `RequestAborted` token 會收到取消通知。
-
-取消不是強制終止 thread。每一層都要把 token 傳給支援 cancellation 的 API，讓工作在安全的檢查點停止。
-
-這條路徑要保持完整：
+這條路徑要完整：
 
 ```text
 HTTP request cancellation
@@ -76,25 +61,45 @@ FreightRateClient
 HttpClient request
 ```
 
-如果 Controller 收到了 token，卻在 Service 裡換成 `CancellationToken.None`，取消就被截斷了。資料庫和後續寫入也要考慮是否使用同一個 token。
+如果 Service 把 token 換成 `CancellationToken.None`，下面的 HTTP 呼叫就不會知道 request 已經取消。資料庫、stream 或其他 I/O 也可能因此繼續做一個沒人要的工作。
 
-## 把外部回應包起來
+## 每次 new HttpClient 可以嗎？
 
-運費服務回傳的是外部契約，不要讓 OrderService 直接處理一個未命名的 JSON object。先替它建立明確的 client response DTO，再由 client 處理 HTTP 細節。
+第一版的 OrderService 每次執行都自己建立 HttpClient。
 
-client 需要做的事包括：
+這種寫法在低頻測試通常看不出問題。高頻呼叫時，連線池、socket、port 和 DNS 更新都變成每次 request 自己處理的問題。另一個極端是建立一個長壽命 client，卻沒有設定連線更新策略，外部服務的 DNS 變更可能很久才被看見。
 
-- 建立 request URL。
-- 傳入 cancellation token。
-- 判斷 404 是否代表「沒有可用運費」還是錯誤。
-- 對其他非成功狀態保留錯誤資訊。
-- 將 response body 反序列化成 DTO。
+這次是單一、明確的運費 API，選 typed client：
 
-`GetFromJsonAsync` 對非成功 status 通常會拋出 HttpRequestException。若業務需要把 404 當成「找不到費率」，就要先取得 response、判斷 status，再讀取 JSON，不能期待便利方法替你做業務判斷。
+```text
+OrderService
+    ↓
+FreightRateClient
+    ↓
+HttpClientFactory 管理的 HttpClient
+    ↓
+運費服務
+```
 
-## 這次先寫一個 client 邊界
+外部 API 的 base address、handler、timeout 和 resilience 設定集中在 client registration；OrderService 只處理建立訂單需要的運費結果。
 
-下面的形狀只處理外部 API，不把折扣規則塞回 client：
+另一條可行路線是 static 或 singleton HttpClient 搭配 SocketsHttpHandler 的 PooledConnectionLifetime。這張工單選 typed client，因為它同時把外部 API 的契約和操作集中起來。
+
+## 404 是錯誤嗎？
+
+運費服務可能回傳幾種狀態：
+
+```text
+200：找到可用費率
+404：這個郵遞區號沒有可用費率，或資源不存在
+503：運費服務暫時不可用
+```
+
+先決定業務語意，再決定例外處理。若 404 代表「沒有可用費率」，它可以轉成 null 或明確的 domain result；503 則不能和 404 混在一起。timeout、連線失敗、JSON 格式錯誤也各自有不同的處理方式。
+
+你原本想直接使用 `GetFromJsonAsync`。它很方便，但非成功 status 通常會拋出 `HttpRequestException`，不會替你判斷 404 對這個業務是不是正常結果。
+
+所以 client 改成先拿 response，再判斷 status：
 
 ```csharp
 using System.Net;
@@ -127,54 +132,53 @@ public sealed class FreightRateClient(HttpClient client)
 }
 ```
 
-`FreightRateClient` 回傳 null 的條件是外部服務明確回 404，不是所有錯誤都吞成 null。timeout、連線失敗、503 和 JSON 格式錯誤，仍然要交給上層按照 application policy 處理。
+`FreightRateClient` 只把明確的 404 轉成 null。其他非成功狀態仍然往上拋，讓 application 層決定要回應錯誤、暫時重試，還是停止建立訂單。
 
-DI registration 則放在組裝位置：
+## Timeout 不是 Retry
 
-```text
-FreightRateClient
-    BaseAddress：由設定取得
-    Timeout：依運費服務的 SLO 決定
-    Handler：由 HttpClientFactory 管理
-```
+這次只是讀取運費，外部呼叫沒有寫入付款或建立訂單。若把 timeout 後的呼叫重試，通常比重試付款安全，但仍然要看服務是否真的冪等、重試會不會造成額外成本，以及 request 是否已經取消。
 
-timeout 不是 retry policy。是否重試要看 HTTP method、外部操作是否冪等，以及重試會不會讓同一個業務動作執行兩次。這張工單目前是讀取運費，後續付款或建立外部訂單時不能直接照搬同一套 retry。
+`HttpClient.Timeout` 可以提供整體時間上限。若使用 `ResponseHeadersRead`，它通常只涵蓋取得 headers 的階段，response body 的讀取還要使用 cancellation token 或另外的 timeout。這個邊界先記在原教材，等檔案下載工單再一起處理。
 
-## JSON 也有自己的邊界
+timeout 和 caller cancellation 都可能表現成 `TaskCanceledException`。不能看到這個 exception 就一律當成伺服器故障；要先判斷 caller token 是否已經取消，並決定 log 等級。
 
-運費服務的 JSON 是傳輸格式，FreightQuote 是 application 內部使用的 DTO。序列化器只負責把資料轉換，不會替你判斷：
+## JSON 只是傳輸格式
 
-- 金額是不是合理。
-- 服務等級是不是允許的值。
-- 這個客戶有沒有權限使用這個地址。
-- 外部服務回傳的欄位是否符合目前版本的契約。
+運費服務回傳 JSON，`FreightQuote` 是 application 內部使用的 DTO。序列化器只負責格式轉換，不會替你判斷：
 
-ASP.NET Core 的 request body、action parameter 和 response DTO 也會經過自己的 model binding 與 JSON formatter。不要因為 API 可以自動反序列化，就把外部 response、資料庫 Entity 和公開 response DTO 混成同一個型別。
+- 金額是否符合訂單規則。
+- 服務等級是否允許使用。
+- 使用者是否有權限使用這個地址。
+- 外部 response 是否符合目前版本的契約。
 
-## 這次事故的處理結果
+同樣的分界也適用於 ASP.NET Core 的 request body 和 response。JSON formatter 可以把資料轉成物件，但 validation、authorization、transaction 和敏感欄位處理仍由 application 自己負責。
 
-目前先完成四個決定：
+## 工單交接
 
 ```text
-1. 外部 HTTP 呼叫使用真正的 async API，不用 Result 或 Wait 阻塞。
-2. HttpClient 交給 IHttpClientFactory 管理，外部 API 用 typed client 封裝。
-3. RequestAborted 一路傳到 HttpClient、資料庫和其他可取消的 I/O。
-4. 404、非成功狀態、timeout、cancellation 和 JSON 錯誤分開處理。
+已完成：
+
+1. 外部 HTTP 呼叫使用 async API，不用 Result 或 Wait 阻塞。
+2. RequestAborted 一路傳到 FreightRateClient。
+3. 運費 API 使用 typed client，交由 HttpClientFactory 管理。
+4. 404、其他非成功 status、timeout、cancellation 和 JSON 錯誤分開處理。
+5. 已確認 timeout 和 retry 是兩個不同決策，不能直接綁在一起。
 ```
 
-頁面不再因為外部服務等待而把同步流程整段卡住。但新工單已經排進來：財務要上傳發票檔案，下載回來卻是空的；而且某些 request 中斷後，暫存檔沒有被釋放。
+運費 client 現在可以被 OrderService 使用。下一張工單是財務上傳發票：下載回來的檔案是空的，某些 request 中斷後暫存檔也沒有釋放。
 
 ## 回原教材查什麼
 
 | 原教材 | 這張工單碰到的內容 | 涵蓋方式 |
 | --- | --- | --- |
 | 06 非同步程式設計 | Task、async／await、I/O 等待、避免 sync-over-async | 透過 timeout 事故帶出 |
-| 07 CancellationToken | RequestAborted、合作式取消、取消例外 | 透過 request 中斷帶過 |
+| 07 CancellationToken | RequestAborted、合作式取消、取消例外 | 透過 request 中斷帶出 |
+| 09 Dependency Injection | typed client 的組裝位置 | 接續 S04 的 DI 邊界 |
 | 10 HttpClient | HttpClientFactory、typed client、timeout、status code、DNS／handler lifetime | 透過外部服務整合帶過 |
-| 12 JSON 與序列化 | DTO、JSON request／response、反序列化、formatter | 透過外部 response 邊界帶出 |
-| 13A ASP.NET Core 架構 | Controller、Service、設定與 exception handling | 接回前一張工單 |
+| 12 JSON 與序列化 | DTO、JSON response、反序列化、formatter | 透過外部契約帶出 |
+| 13A ASP.NET Core 架構 | Controller、Service、設定與例外處理 | 接回前兩張工單 |
 
-完整回讀仍放在原教材：ValueTask、HttpClient resilience handler、ResponseHeadersRead 的 timeout 邊界、Newtonsoft.Json 與 System.Text.Json 的完整差異，以及 JSON options 和 source generation。
+完整回讀仍放在原教材：ValueTask、標準 resilience handler、ResponseHeadersRead 的 timeout 邊界、static client 搭配 PooledConnectionLifetime、Newtonsoft.Json 與 System.Text.Json 的差異，以及 JSON options 和 source generation。
 
 ---
 
